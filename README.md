@@ -1,4 +1,4 @@
-# PRender
+# ar-renderer (PRender)
 
 A physically based, **spectral**, **unbiased** renderer driven by **Metropolis Light Transport**. It is an x64 command-line tool (`prender.exe`) with a lightweight WinUI 3 front end that shows four views of the scene.
 
@@ -137,3 +137,15 @@ schemas/          JSON Schema for .prscene.json
 - MMLT and PSSMLT need a finite `max_depth`, and paths longer than that are not sampled. Use 64 or more for scenes with heavy subsurface scattering. The path tracer and BDPT use Russian roulette.
 - Only homogeneous media are supported. Heterogeneous (NanoVDB) media, normal and bump mapping, glTF/USD import, and resume/checkpointing are not implemented yet (see `PLAN.md`).
 - SDS paths lit by *point* lights through *pinhole* cameras have zero probability under any unbiased sampler. Use area lights and thin-lens cameras for caustics seen through glass.
+
+## License
+
+Released under the [MIT License](LICENSE). Copyright (c) 2026 Andrew Rigney.
+
+Vendored third-party code in `third_party/` keeps its own license:
+
+| Library | License |
+|---|---|
+| [stb_image / stb_image_write](https://github.com/nothings/stb) | MIT or public domain (choose either) |
+| [nlohmann/json](https://github.com/nlohmann/json) | MIT |
+| [doctest](https://github.com/doctest/doctest) | MIT |
