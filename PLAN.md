@@ -166,33 +166,34 @@ Scene
 ```jsonc
 {
   "$schema": "../schemas/prscene.schema.json",
-  "version": 1,
-  "units": "meters",
-  "include": ["rigs/studio.json", "materials/library.json"],
+  "include": ["materials.json"],                       // textures/materials/media library
+  "rigs": { "studio": "rigs/studio.json", "fog": "rigs/fog.json" },
+  "active_rigs": ["studio"],                           // --rig / --add-rig override this
 
   "textures": {
-    "checker": { "type": "checker", "scale": 8, "a": [0.8,0.8,0.8], "b": [0.2,0.2,0.2], "colorspace": "srgb" }
+    "checker": { "type": "checker", "uv_scale": 8, "a": [0.8, 0.8, 0.8], "b": [0.2, 0.2, 0.2] }
   },
   "materials": {
-    "floor":   { "model": "openpbr", "base_color": { "texture": "checker" }, "specular_roughness": 0.6 },
-    "sf11":    { "model": "openpbr", "transmission_weight": 1, "ior": { "sellmeier": "SCHOTT_SF11" } }
+    "floor": { "type": "diffuse", "reflectance": { "texture": "checker" } },
+    "sf11":  { "type": "dielectric", "ior": "SF11" },                       // dispersive (Sellmeier)
+    "jade":  { "type": "subsurface", "ior": 1.61, "albedo": [0.55, 0.92, 0.62], "mfp": [0.02, 0.07, 0.03] }
   },
   "geometry": {
-    "unit_sphere": { "type": "sphere", "radius": 1 },
-    "ground":      { "type": "mesh", "file": "meshes/ground.ply" }
+    "ball":   { "type": "sphere", "radius": 0.5 },
+    "ground": { "type": "rect", "size": [20, 20] }
   },
   "objects": [
-    { "geometry": "ground",      "material": "floor" },
-    { "geometry": "unit_sphere", "material": "sf11", "transform": { "translate": [0,1,0], "scale": 0.5 } }
+    { "geometry": "ground", "material": "floor" },
+    { "geometry": "ball", "material": "sf11", "transform": { "translate": [0, 0.5, 0] } }
   ],
   "cameras": {
-    "main": { "type": "thin_lens", "position": [4,3,6], "look_at": [0,0.8,0], "fov_y": 35, "f_stop": 8, "focus_distance": 7.2 }
+    "main": { "type": "thin_lens", "position": [4, 3, 6], "look_at": [0, 0.8, 0], "fov_y": 35, "f_stop": 8, "focus_on": [0, 0.5, 0] }
   },
   "render": {
     "camera": "main",
-    "integrator": { "type": "mmlt", "max_depth": 32, "bootstrap": 400000, "chains": 1024, "large_step": 0.3 },
-    "film": { "width": 1280, "height": 720, "filter": "blackman_harris", "colorspace": "acescg" },
-    "output": [ { "file": "out.exr" }, { "file": "out.png", "tonemap": "agx" } ]
+    "integrator": { "type": "mmlt", "max_depth": 64, "mutations_per_pixel": 512, "bootstrap_samples": 1000000, "chains": 1024 },
+    "film": { "width": 1280, "height": 720, "filter": { "type": "blackman_harris", "radius": 1.5 }, "colorspace": "acescg" },
+    "output": [ { "file": "out.exr" }, { "file": "out.png", "tonemap": "aces" } ]
   }
 }
 ```
@@ -376,3 +377,23 @@ Phases 4–8 are the bulk of the work. The UI (phase 10) can be built in paralle
 - Jakob & Marschner, *Manifold Exploration* (2012)
 - Pharr, Jakob, Humphreys, *Physically Based Rendering*, 4th ed.
 - OpenPBR Surface specification (ASWF)
+
+---
+
+## 14. Implementation status (v0.1)
+
+Built and verified: renderer (`build.cmd renderer`), tests (`build.cmd test`, 13 cases / 144 assertions passing), WinUI 3 app (`build.cmd ui`), sample scene rendered end-to-end from the UI.
+
+| Area | Status | Notes / deviations from the plan |
+|---|---|---|
+| Ray tracing kernel | Done | **Own binned-SAH BVH** instead of Embree: zero external dependencies; plenty fast for the target scenes. Embree remains a drop-in option behind `BVH`. |
+| Dependencies | Done | Vendored single headers (stb_image/_write, nlohmann/json, doctest) instead of vcpkg + OIIO/TBB; own EXR writer and thread pool. |
+| Spectral pipeline | Done | Hero wavelengths, visible-importance wavelength sampling, analytic CIE fits, D65, Jakob–Hanika uplift (table fitted at first run and cached), spectral white adaptation. |
+| Integrators | Done | Path (reference), BDPT (MIS, media, RR), **MMLT (default)**, PSSMLT. Wavelength is part of primary sample space. |
+| Materials | Done (subset of OpenPBR) | Typed materials (diffuse, conductor, dielectric/thin, coated_diffuse, coated_conductor, subsurface, interface) + sheen/emission blocks rather than a single OpenPBR uber-material. |
+| Media / SSS | Partial | Homogeneous chromatic media, spectral-MIS distance sampling, random-walk SSS, auto-detected enclosing media. **Heterogeneous (NanoVDB) media not yet.** |
+| Lights | Done (subset) | Area (with cos^n lobe), point, spot, constant/HDR environment, power-based selection. IES, sun/sky and light BVH not yet. |
+| Cameras | Done (subset) | Thin lens, pinhole, orthographic (path tracer only). Realistic lens not yet. |
+| File formats | Partial | Native JSON (+ schema, includes, rigs), OBJ, PLY, PNG/JPEG/HDR/PFM textures, EXR/PFM/PNG/JPEG output. glTF, pbrt-v4, USD import and AOVs not yet. |
+| CLI | Done | JSON progress protocol, previews, stdin/Ctrl+C cancel with flush, time/mutation budgets. Checkpoint/resume not yet. |
+| WinUI 3 app | Done | C# / .NET 8 / Win2D; 4 views (3 schematic ortho + ray-cast camera preview with orbit/pan/dolly), render panel with live progressive preview. |

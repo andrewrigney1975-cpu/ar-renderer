@@ -1,0 +1,314 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://example.invalid/prender/prscene.schema.json",
+  "title": "PRender scene (.prscene.json)",
+  "description": "Scene description for the prender spectral MLT renderer. Files may contain // comments. Sections are merged across 'include' files and light rigs: dictionary sections by id, 'objects' by concatenation.",
+  "type": "object",
+  "definitions": {
+    "vec3": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
+    "vec3OrScalar": { "oneOf": [ { "type": "number" }, { "$ref": "#/definitions/vec3" } ] },
+    "textureRef": {
+      "type": "object",
+      "properties": {
+        "texture": { "type": "string", "description": "Id of an entry in 'textures'." },
+        "channel": { "enum": ["r", "g", "b", "avg"], "description": "Channel used when a float parameter reads an image." }
+      },
+      "required": ["texture"],
+      "additionalProperties": false
+    },
+    "spectrum": {
+      "description": "Number, [r,g,b] (uplifted to a smooth spectrum), a named spectrum, or an explicit spectrum.",
+      "oneOf": [
+        { "type": "number" },
+        { "$ref": "#/definitions/vec3" },
+        { "type": "string", "description": "Named data, e.g. D65, BK7, SF11, diamond, water, fused_silica, sapphire." },
+        {
+          "type": "object",
+          "properties": {
+            "blackbody": { "type": "number", "description": "Kelvin" },
+            "temperature": { "type": "number", "description": "Kelvin" },
+            "sellmeier": {
+              "description": "Sellmeier coefficients [B1..Bn, C1..Cn] (C in um^2) or {B:[...], C:[...]}",
+              "oneOf": [ { "type": "array", "items": { "type": "number" } },
+                         { "type": "object", "properties": { "B": { "type": "array" }, "C": { "type": "array" } } } ]
+            },
+            "cauchy": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2, "description": "[A, B] with B in nm^2" },
+            "samples": { "type": "array", "items": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 },
+                         "description": "[[lambda_nm, value], ...]" },
+            "file": { "type": "string", "description": "CSV with 'lambda_nm, value' rows" }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "spectrumParam": { "oneOf": [ { "$ref": "#/definitions/spectrum" }, { "$ref": "#/definitions/textureRef" } ] },
+    "floatParam": { "oneOf": [ { "type": "number" }, { "$ref": "#/definitions/textureRef" } ] },
+    "transform": {
+      "type": "object",
+      "description": "Applied as translate * rotate * scale. 'matrix' (16 numbers, row-major) overrides the others.",
+      "properties": {
+        "translate": { "$ref": "#/definitions/vec3" },
+        "rotate": {
+          "description": "[angle_deg, ax, ay, az], a list of those, or {axis, angle}",
+          "oneOf": [ { "type": "array" }, { "type": "object", "properties": { "axis": { "$ref": "#/definitions/vec3" }, "angle": { "type": "number" } } } ]
+        },
+        "euler": { "$ref": "#/definitions/vec3", "description": "Degrees; applied X, then Y, then Z." },
+        "scale": { "$ref": "#/definitions/vec3OrScalar" },
+        "matrix": { "type": "array", "items": { "type": "number" }, "minItems": 16, "maxItems": 16 }
+      },
+      "additionalProperties": false
+    },
+    "emission": {
+      "type": "object",
+      "description": "Emission makes every primitive of the object an area light.",
+      "properties": {
+        "temperature": { "type": "number", "description": "Blackbody colour (Kelvin), normalized to unit luminance." },
+        "color": { "$ref": "#/definitions/spectrum" },
+        "spectrum": { "$ref": "#/definitions/spectrum" },
+        "luminance": { "type": "number", "description": "Radiance scale (luminance for temperature/spectrum emitters)." },
+        "intensity": { "type": "number", "description": "Alias of luminance." },
+        "power": { "type": "number", "description": "Total emitted power; overrides luminance." },
+        "two_sided": { "type": "boolean" },
+        "cos_power": { "type": "number", "minimum": 0, "description": "Emission lobe L(w) ~ cos^n; 0 = Lambertian. Use >0 for spot-like area lights." }
+      },
+      "additionalProperties": false
+    },
+    "sheen": {
+      "type": "object",
+      "properties": {
+        "color": { "$ref": "#/definitions/spectrumParam" },
+        "roughness": { "$ref": "#/definitions/floatParam" },
+        "weight": { "type": "number", "minimum": 0, "maximum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "ior": {
+      "description": "Index of refraction: number (non-dispersive), named glass, or a dispersive spectrum (sellmeier/cauchy).",
+      "$ref": "#/definitions/spectrum"
+    },
+    "material": {
+      "type": "object",
+      "properties": {
+        "type": { "enum": ["diffuse", "conductor", "metal", "dielectric", "glass", "subsurface", "coated_diffuse", "coated_conductor", "interface"] },
+        "reflectance": { "$ref": "#/definitions/spectrumParam" },
+        "color": { "$ref": "#/definitions/spectrumParam" },
+        "metal": { "enum": ["Au", "Ag", "Cu", "Al"] },
+        "eta": { "$ref": "#/definitions/spectrumParam" },
+        "k": { "$ref": "#/definitions/spectrumParam" },
+        "roughness": { "$ref": "#/definitions/floatParam", "description": "Perceptual roughness; alpha = roughness^2." },
+        "roughness_u": { "$ref": "#/definitions/floatParam" },
+        "roughness_v": { "$ref": "#/definitions/floatParam" },
+        "ior": { "$ref": "#/definitions/ior" },
+        "thin": { "type": "boolean" },
+        "coat_ior": { "$ref": "#/definitions/ior" },
+        "coat_roughness": { "$ref": "#/definitions/floatParam" },
+        "thickness": { "$ref": "#/definitions/floatParam" },
+        "albedo": { "description": "coated_*: medium albedo between layers; subsurface: multiple-scattering albedo (rgb).", "$ref": "#/definitions/spectrumParam" },
+        "mfp": { "$ref": "#/definitions/vec3OrScalar", "description": "subsurface: mean free path per channel (scene units)." },
+        "sigma_a": { "$ref": "#/definitions/spectrum" },
+        "sigma_s": { "$ref": "#/definitions/spectrum" },
+        "scale": { "type": "number" },
+        "g": { "type": "number", "minimum": -1, "maximum": 1 },
+        "medium": { "type": "string", "description": "Interior medium id (dielectric/interface)." },
+        "sheen": { "$ref": "#/definitions/sheen" },
+        "emission": { "$ref": "#/definitions/emission" }
+      },
+      "additionalProperties": false
+    },
+    "medium": {
+      "type": "object",
+      "properties": {
+        "type": { "const": "homogeneous" },
+        "sigma_a": { "$ref": "#/definitions/spectrum" },
+        "sigma_s": { "$ref": "#/definitions/spectrum" },
+        "albedo": { "$ref": "#/definitions/vec3OrScalar" },
+        "mfp": { "$ref": "#/definitions/vec3OrScalar" },
+        "scale": { "type": "number" },
+        "g": { "type": "number", "minimum": -1, "maximum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "texture": {
+      "type": "object",
+      "properties": {
+        "type": { "enum": ["image", "checker", "constant"] },
+        "file": { "type": "string" },
+        "colorspace": { "enum": ["srgb", "linear", "data"] },
+        "wrap": { "enum": ["repeat", "clamp", "mirror"] },
+        "flip_v": { "type": "boolean" },
+        "multiplier": { "type": "number" },
+        "uv_scale": { "oneOf": [ { "type": "number" }, { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 } ] },
+        "uv_offset": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 },
+        "a": { "$ref": "#/definitions/spectrumParam" },
+        "b": { "$ref": "#/definitions/spectrumParam" },
+        "value": { "$ref": "#/definitions/spectrumParam" }
+      },
+      "additionalProperties": false
+    },
+    "geometry": {
+      "type": "object",
+      "properties": {
+        "type": { "enum": ["sphere", "rect", "quad", "box", "cube", "disk", "mesh"] },
+        "radius": { "type": "number" },
+        "center": { "$ref": "#/definitions/vec3" },
+        "size": { "type": "array", "items": { "type": "number" } },
+        "segments": { "type": "integer" },
+        "file": { "type": "string", "description": "OBJ or PLY" },
+        "closed": { "type": "boolean", "description": "Mesh encloses a volume (enables interior media)." }
+      },
+      "required": ["type"],
+      "additionalProperties": false
+    },
+    "object": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "geometry": { "type": "string" },
+        "material": { "type": "string" },
+        "transform": { "$ref": "#/definitions/transform" },
+        "interior": { "type": ["string", "null"] },
+        "exterior": { "type": ["string", "null"], "description": "Medium id, null, or 'auto' (default: innermost enclosing medium)." },
+        "emission": { "$ref": "#/definitions/emission" },
+        "flip_normals": { "type": "boolean" },
+        "visible": { "type": "boolean" }
+      },
+      "required": ["geometry", "material"],
+      "additionalProperties": false
+    },
+    "light": {
+      "type": "object",
+      "properties": {
+        "type": { "enum": ["point", "spot", "rect", "disk", "sphere", "environment", "env", "sky"] },
+        "enabled": { "type": "boolean" },
+        "position": { "$ref": "#/definitions/vec3" },
+        "look_at": { "$ref": "#/definitions/vec3" },
+        "direction": { "$ref": "#/definitions/vec3" },
+        "size": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 },
+        "radius": { "type": "number" },
+        "temperature": { "type": "number" },
+        "color": { "$ref": "#/definitions/spectrum" },
+        "spectrum": { "$ref": "#/definitions/spectrum" },
+        "luminance": { "type": "number" },
+        "intensity": { "type": "number" },
+        "power": { "type": "number" },
+        "scale": { "type": "number" },
+        "two_sided": { "type": "boolean" },
+        "cos_power": { "type": "number" },
+        "cone_angle": { "type": "number" },
+        "falloff_start": { "type": "number" },
+        "file": { "type": "string", "description": "Equirectangular .hdr / .pfm / .png environment map" },
+        "rotation": { "type": "number", "description": "Environment rotation about +Y (degrees)" }
+      },
+      "required": ["type"],
+      "additionalProperties": false
+    },
+    "camera": {
+      "type": "object",
+      "properties": {
+        "type": { "enum": ["perspective", "thin_lens", "pinhole", "orthographic", "ortho"] },
+        "position": { "$ref": "#/definitions/vec3" },
+        "look_at": { "$ref": "#/definitions/vec3" },
+        "direction": { "$ref": "#/definitions/vec3" },
+        "up": { "$ref": "#/definitions/vec3" },
+        "fov_y": { "type": "number" },
+        "focal_length_mm": { "type": "number" },
+        "sensor_height_mm": { "type": "number" },
+        "f_stop": { "type": "number" },
+        "aperture_radius": { "type": "number" },
+        "focus_distance": { "type": "number" },
+        "focus_on": { "$ref": "#/definitions/vec3" },
+        "units_per_meter": { "type": "number" },
+        "ortho_height": { "type": "number" }
+      },
+      "required": ["position"],
+      "additionalProperties": false
+    },
+    "rigDocument": {
+      "type": "object",
+      "description": "A light rig: typically 'lights', optionally media/materials/geometry/objects (e.g. a fog volume).",
+      "properties": {
+        "lights": { "type": "object", "additionalProperties": { "$ref": "#/definitions/light" } },
+        "media": { "type": "object", "additionalProperties": { "$ref": "#/definitions/medium" } },
+        "materials": { "type": "object", "additionalProperties": { "$ref": "#/definitions/material" } },
+        "geometry": { "type": "object", "additionalProperties": { "$ref": "#/definitions/geometry" } },
+        "objects": { "type": "array", "items": { "$ref": "#/definitions/object" } }
+      }
+    }
+  },
+  "properties": {
+    "$schema": { "type": "string" },
+    "version": { "type": "integer" },
+    "units": { "type": "string" },
+    "include": { "type": "array", "items": { "type": "string" } },
+    "textures": { "type": "object", "additionalProperties": { "$ref": "#/definitions/texture" } },
+    "materials": { "type": "object", "additionalProperties": { "$ref": "#/definitions/material" } },
+    "media": { "type": "object", "additionalProperties": { "$ref": "#/definitions/medium" } },
+    "geometry": { "type": "object", "additionalProperties": { "$ref": "#/definitions/geometry" } },
+    "objects": { "type": "array", "items": { "$ref": "#/definitions/object" } },
+    "lights": { "type": "object", "additionalProperties": { "$ref": "#/definitions/light" } },
+    "cameras": { "type": "object", "additionalProperties": { "$ref": "#/definitions/camera" } },
+    "rigs": {
+      "type": "object",
+      "description": "Named light rigs: a file path or an inline rig document.",
+      "additionalProperties": { "oneOf": [ { "type": "string" }, { "$ref": "#/definitions/rigDocument" } ] }
+    },
+    "active_rigs": { "type": "array", "items": { "type": "string" } },
+    "render": {
+      "type": "object",
+      "properties": {
+        "camera": { "type": "string" },
+        "seed": { "type": "integer", "minimum": 0 },
+        "integrator": {
+          "type": "object",
+          "properties": {
+            "type": { "enum": ["mmlt", "mlt", "pssmlt", "bdpt", "path", "pt"] },
+            "max_depth": { "type": "integer", "description": "<= 0 selects the integrator default (path: unlimited with Russian roulette)." },
+            "spp": { "type": "integer", "minimum": 1 },
+            "mutations_per_pixel": { "type": "number", "exclusiveMinimum": 0 },
+            "bootstrap_samples": { "type": "integer", "minimum": 1 },
+            "chains": { "type": "integer", "minimum": 1 },
+            "large_step_probability": { "type": "number", "minimum": 0, "maximum": 1 },
+            "sigma": { "type": "number", "exclusiveMinimum": 0 },
+            "time_limit": { "oneOf": [ { "type": "number" }, { "type": "string", "pattern": "^[0-9.]+(ms|s|m|min|h)?$" } ] },
+            "russian_roulette": { "type": "boolean" }
+          },
+          "additionalProperties": false
+        },
+        "film": {
+          "type": "object",
+          "properties": {
+            "width": { "type": "integer", "minimum": 1 },
+            "height": { "type": "integer", "minimum": 1 },
+            "filter": {
+              "oneOf": [
+                { "enum": ["box", "gaussian", "blackman_harris"] },
+                { "type": "object", "properties": { "type": { "enum": ["box", "gaussian", "blackman_harris"] }, "radius": { "type": "number" } } }
+              ]
+            },
+            "colorspace": { "enum": ["srgb", "acescg", "rec2020"] },
+            "exposure": { "type": "number", "description": "EV" },
+            "white_balance": { "type": "number", "description": "Kelvin; 0 disables" }
+          },
+          "additionalProperties": false
+        },
+        "output": {
+          "oneOf": [
+            { "type": "string" },
+            { "type": "array", "items": { "oneOf": [ { "type": "string" }, {
+              "type": "object",
+              "properties": {
+                "file": { "type": "string", "description": ".exr, .pfm, .png, .jpg, .bmp, .tga" },
+                "tonemap": { "enum": ["aces", "filmic", "reinhard", "clamp", "none", "linear"] },
+                "half": { "type": "boolean", "description": "EXR: store half floats" }
+              },
+              "required": ["file"],
+              "additionalProperties": false
+            } ] } }
+          ]
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

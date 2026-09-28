@@ -1,0 +1,17 @@
+{
+  // Volumetric rig: a thin forward-scattering haze filling the set, bounded by an invisible
+  // box (material type "interface"). Enable with --add-rig fog to see light shafts from the key
+  // light and caustics focused through the glass spheres.
+  "media": {
+    "haze": { "type": "homogeneous", "sigma_s": 0.035, "sigma_a": 0.002, "g": 0.6 }
+  },
+  "materials": {
+    "haze_boundary": { "type": "interface", "medium": "haze" }
+  },
+  "geometry": {
+    "haze_volume": { "type": "box", "size": [16, 7, 16] }
+  },
+  "objects": [
+    { "name": "haze volume", "geometry": "haze_volume", "material": "haze_boundary", "transform": { "translate": [0, 3.0, 0] } }
+  ]
+}

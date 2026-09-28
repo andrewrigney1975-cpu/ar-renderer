@@ -1,0 +1,29 @@
+{
+  // Studio light rig: a hard-edged key (area light with a cos^n lobe, like a softbox with a
+  // grid) behind and above the pyramid so glass caustics fall towards the camera, plus a dim
+  // cool sky fill. Swap rigs with --rig <name>; models never contain lights.
+  "lights": {
+    "key": {
+      "type": "rect",
+      "position": [-2.6, 4.6, -3.2],
+      "look_at": [0, 0.6, 0],
+      "size": [0.5, 0.5],
+      "temperature": 5200,
+      "luminance": 260,
+      "cos_power": 6
+    },
+    "fill": {
+      "type": "rect",
+      "position": [-4.0, 3.2, 4.2],
+      "look_at": [0, 0.9, 0],
+      "size": [2.0, 1.4],
+      "temperature": 6500,
+      "luminance": 2.5
+    },
+    "sky": {
+      "type": "environment",
+      "color": [0.55, 0.68, 1.0],
+      "intensity": 0.12
+    }
+  }
+}

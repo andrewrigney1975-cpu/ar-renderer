@@ -1,0 +1,72 @@
+{
+  // Sphere Pyramid: 14 spheres (3x3 + 2x2 + 1) of radius 0.5 m in square-pyramid packing.
+  // Layer heights: y0 = r, y1 = r + r*sqrt(2), y2 = r + 2*r*sqrt(2).
+  "$schema": "../../schemas/prscene.schema.json",
+  "version": 1,
+  "units": "meters",
+  "include": ["materials.json"],
+
+  "rigs": {
+    "studio": "rigs/studio.json",
+    "fog": "rigs/fog.json"
+  },
+  "active_rigs": ["studio"],
+
+  "geometry": {
+    "ball":   { "type": "sphere", "radius": 0.5 },
+    "ground": { "type": "rect", "size": [20, 20] }
+  },
+
+  "objects": [
+    { "name": "floor", "geometry": "ground", "material": "floor" },
+
+    { "name": "L0 front-left: SF11 flint (dispersion)", "geometry": "ball", "material": "glass_sf11",      "transform": { "translate": [-1.0, 0.5,  1.0] } },
+    { "name": "L0 front-mid: BK7 crown (caustics)",     "geometry": "ball", "material": "glass_bk7",       "transform": { "translate": [ 0.0, 0.5,  1.0] } },
+    { "name": "L0 front-right: diamond",                "geometry": "ball", "material": "diamond",         "transform": { "translate": [ 1.0, 0.5,  1.0] } },
+    { "name": "L0 mid-left: polished gold",             "geometry": "ball", "material": "gold_polished",   "transform": { "translate": [-1.0, 0.5,  0.0] } },
+    { "name": "L0 centre: jade (subsurface)",           "geometry": "ball", "material": "jade",            "transform": { "translate": [ 0.0, 0.5,  0.0] } },
+    { "name": "L0 mid-right: satin aluminium",          "geometry": "ball", "material": "satin_aluminium", "transform": { "translate": [ 1.0, 0.5,  0.0] } },
+    { "name": "L0 back-left: rough copper",             "geometry": "ball", "material": "copper_rough",    "transform": { "translate": [-1.0, 0.5, -1.0] } },
+    { "name": "L0 back-mid: wax (subsurface)",          "geometry": "ball", "material": "wax",             "transform": { "translate": [ 0.0, 0.5, -1.0] } },
+    { "name": "L0 back-right: water",                   "geometry": "ball", "material": "water",           "transform": { "translate": [ 1.0, 0.5, -1.0] } },
+
+    { "name": "L1 front-left: frosted glass",           "geometry": "ball", "material": "frosted_glass",   "transform": { "translate": [-0.5, 1.2071068,  0.5] } },
+    { "name": "L1 front-right: opal",                   "geometry": "ball", "material": "opal",            "transform": { "translate": [ 0.5, 1.2071068,  0.5] } },
+    { "name": "L1 back-left: red satin",                "geometry": "ball", "material": "red_satin",       "transform": { "translate": [-0.5, 1.2071068, -0.5] } },
+    { "name": "L1 back-right: car paint",               "geometry": "ball", "material": "car_paint",       "transform": { "translate": [ 0.5, 1.2071068, -0.5] } },
+
+    { "name": "L2 apex: self-illuminated",              "geometry": "ball", "material": "glow",            "transform": { "translate": [ 0.0, 1.9142136,  0.0] } }
+  ],
+
+  "cameras": {
+    "main":  { "type": "thin_lens", "position": [3.6, 2.4, 5.6], "look_at": [0, 0.85, 0], "fov_y": 30,
+               "f_stop": 4, "focus_on": [0, 0.8, 0.6] },
+    "top":   { "type": "orthographic", "position": [0, 10, 0], "look_at": [0, 0, 0], "up": [0, 0, -1], "ortho_height": 5 },
+    "front": { "type": "orthographic", "position": [0, 1.2, 10], "look_at": [0, 1.2, 0], "ortho_height": 4 },
+    "side":  { "type": "orthographic", "position": [10, 1.2, 0], "look_at": [0, 1.2, 0], "ortho_height": 4 }
+  },
+
+  "render": {
+    "camera": "main",
+    "seed": 1,
+    "integrator": {
+      "type": "mmlt",
+      "max_depth": 64,
+      "mutations_per_pixel": 512,
+      "bootstrap_samples": 1000000,
+      "chains": 1024,
+      "large_step_probability": 0.3,
+      "sigma": 0.01
+    },
+    "film": {
+      "width": 960, "height": 540,
+      "filter": { "type": "blackman_harris", "radius": 1.5 },
+      "colorspace": "srgb",
+      "exposure": 0
+    },
+    "output": [
+      { "file": "render.exr" },
+      { "file": "render.png", "tonemap": "aces" }
+    ]
+  }
+}

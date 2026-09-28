@@ -1,0 +1,7 @@
+build/
+out/
+*.user
+.vs/
+bin/
+obj/
+*.log

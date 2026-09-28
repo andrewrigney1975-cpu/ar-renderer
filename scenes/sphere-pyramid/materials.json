@@ -1,0 +1,53 @@
+{
+  // Material library for the sphere pyramid. Materials reference textures and media by id;
+  // they never own image data or lights (emission is an appearance property of the material).
+  "textures": {
+    "floor_checker": { "type": "checker", "uv_scale": 20, "a": [0.72, 0.72, 0.70], "b": [0.42, 0.42, 0.41] }
+  },
+  "media": {
+    "water_absorption": { "type": "homogeneous", "sigma_a": [0.9, 0.12, 0.05], "sigma_s": 0.0 }
+  },
+  "materials": {
+    "floor":           { "type": "diffuse", "reflectance": { "texture": "floor_checker" } },
+
+    "glass_bk7":       { "type": "dielectric", "ior": "BK7" },
+    "glass_sf11":      { "type": "dielectric", "ior": "SF11" },
+    "diamond":         { "type": "dielectric", "ior": "diamond" },
+    "water":           { "type": "dielectric", "ior": "water", "medium": "water_absorption" },
+    "frosted_glass":   { "type": "dielectric", "ior": "BK7", "roughness": 0.35 },
+
+    "gold_polished":   { "type": "conductor", "metal": "Au", "roughness": 0.05 },
+    "copper_rough":    { "type": "conductor", "metal": "Cu", "roughness": 0.45 },
+    "satin_aluminium": {
+      "type": "conductor", "metal": "Al", "roughness_u": 0.25, "roughness_v": 0.6,
+      "sheen": { "color": [0.9, 0.92, 0.95], "roughness": 0.35, "weight": 0.6 }
+    },
+
+    "jade": {
+      "type": "subsurface", "ior": 1.61, "roughness": 0.12,
+      "albedo": [0.55, 0.92, 0.62], "mfp": [0.02, 0.07, 0.03]
+    },
+    "wax": {
+      "type": "subsurface", "ior": 1.45, "roughness": 0.3,
+      "albedo": [0.96, 0.86, 0.70], "mfp": [0.05, 0.03, 0.015]
+    },
+    "opal": {
+      "type": "subsurface", "ior": 1.45,
+      "albedo": [0.92, 0.94, 0.97], "mfp": [0.25, 0.10, 0.04], "g": 0.2
+    },
+
+    "car_paint": {
+      "type": "coated_conductor", "coat_ior": 1.5, "coat_roughness": 0.0, "thickness": 0.01,
+      "reflectance": [0.62, 0.04, 0.07], "roughness": 0.35
+    },
+    "red_satin": {
+      "type": "diffuse", "reflectance": [0.45, 0.03, 0.05],
+      "sheen": { "color": [1.0, 0.45, 0.5], "roughness": 0.3, "weight": 1.0 }
+    },
+
+    "glow": {
+      "type": "diffuse", "reflectance": [0.9, 0.8, 0.6],
+      "emission": { "temperature": 2700, "luminance": 2.5 }
+    }
+  }
+}
