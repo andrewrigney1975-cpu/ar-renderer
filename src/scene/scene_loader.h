@@ -18,6 +18,10 @@ struct LoadOptions {
 
 std::unique_ptr<Scene> LoadScene(const std::string &path, const LoadOptions &opts, std::string *err);
 
+// Writes the fully composed scene (includes, imports, active rigs not applied) as native JSON,
+// e.g. to convert glTF / pbrt scenes into .prscene.json.
+bool ConvertSceneToJson(const std::string &path, const std::string &outPath, std::string *err);
+
 // Parse a duration such as "90", "90s", "10m", "1.5h" into seconds. Returns false on error.
 bool ParseDuration(const std::string &s, double *seconds);
 

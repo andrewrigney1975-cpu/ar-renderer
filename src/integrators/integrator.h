@@ -2,6 +2,7 @@
 
 #include "core/film.h"
 #include "core/rng.h"
+#include "core/serialize.h"
 #include "scene/scene.h"
 
 #include <atomic>
@@ -52,10 +53,23 @@ class RenderControl {
     std::function<void(const Film &, double scale)> onPreview;
     double previewInterval = 0;  // seconds; 0 disables previews
     double progressInterval = 0.5;
+    // Checkpointing: state is written to checkpointPath periodically, on cancel and at the end;
+    // a render resumes from resumePath when set (it must match the scene and settings).
+    std::string checkpointPath, resumePath;
+    double checkpointInterval = 60;
+    uint64_t fingerprint = 0, seed = 0;
+
+    bool CheckpointDue() {
+        if (checkpointPath.empty()) return false;
+        auto now = Clock::now();
+        if (std::chrono::duration<double>(now - lastCheckpoint_).count() < checkpointInterval) return false;
+        lastCheckpoint_ = now;
+        return true;
+    }
 
     void Start() {
         start_ = Clock::now();
-        lastPreview_ = lastProgress_ = start_;
+        lastPreview_ = lastProgress_ = lastCheckpoint_ = start_;
     }
     double Elapsed() const { return std::chrono::duration<double>(Clock::now() - start_).count(); }
     void Progress(const ProgressInfo &p, bool force = false) {
@@ -77,7 +91,7 @@ class RenderControl {
 
   private:
     using Clock = std::chrono::steady_clock;
-    Clock::time_point start_, lastPreview_, lastProgress_;
+    Clock::time_point start_, lastPreview_, lastProgress_, lastCheckpoint_;
 };
 
 class Integrator {
@@ -87,6 +101,13 @@ class Integrator {
     // resolving the film (the film accumulates unnormalized sums).
     virtual bool Render(const Scene &scene, Film &film, RenderControl &control, double *scale, std::string *err) = 0;
 };
+
+// Checkpoint files: a validated header (integrator, settings, film size, scene fingerprint),
+// the film accumulators and an integrator-specific body.
+bool WriteCheckpoint(const RenderControl &control, const IntegratorSettings &s, const Film &film,
+                     const std::function<void(BinaryWriter &)> &body, std::string *err);
+bool ReadCheckpoint(const RenderControl &control, const IntegratorSettings &s, Film &film,
+                    const std::function<bool(BinaryReader &)> &body, std::string *err);
 
 std::unique_ptr<Integrator> CreateIntegrator(const IntegratorSettings &settings, uint64_t seed);
 

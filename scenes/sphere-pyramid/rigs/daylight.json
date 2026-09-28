@@ -1,0 +1,14 @@
+{
+  // Daylight rig: Preetham analytic sky plus a physically attenuated sun disk (Rayleigh and
+  // aerosol extinction by air mass). Try --rig daylight; lower "elevation" for a sunset.
+  "lights": {
+    "sun_and_sky": {
+      "type": "sun_sky",
+      "elevation": 28,
+      "azimuth": -130,
+      "turbidity": 3.0,
+      "sun_size": 2.0,
+      "ground_albedo": 0.25
+    }
+  }
+}

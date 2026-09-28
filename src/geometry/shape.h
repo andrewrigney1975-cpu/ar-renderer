@@ -40,6 +40,11 @@ class Shape {
     virtual std::optional<ShapeSample> Sample(const ShapeSampleContext &ctx, Vec2f u) const;
     // Solid-angle pdf of sampling direction wi from ctx (assumes the ray hits this shape).
     virtual float PDF(const ShapeSampleContext &ctx, const Vec3f &wi) const;
+    // Bound of the surface normals: returns the cone axis and cos(half-angle) (-1 = all directions).
+    virtual void NormalBounds(Vec3f *w, float *cosTheta) const {
+        *w = Vec3f(0, 0, 1);
+        *cosTheta = -1;
+    }
     // Point containment for closed shapes (used to auto-detect enclosing media).
     virtual bool Contains(const Vec3f &) const { return false; }
 };
@@ -87,6 +92,7 @@ class Triangle : public Shape {
     float Area() const override;
     std::optional<ShapeSample> Sample(Vec2f u) const override;
     bool Contains(const Vec3f &p) const override { return mesh_->closed && mesh_->Contains(p); }
+    void NormalBounds(Vec3f *w, float *cosTheta) const override;
     const TriangleMesh &Mesh() const { return *mesh_; }
     int Index() const { return tri_; }
 

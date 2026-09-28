@@ -31,6 +31,12 @@ class Camera {
   public:
     virtual ~Camera() = default;
     virtual std::optional<Ray> GenerateRay(const CameraSample &s) const = 0;
+    // Wavelength-aware variant (lens dispersion may terminate secondary wavelengths) returning a
+    // ray weight (vignetting). Defaults to the plain version with weight 1.
+    virtual std::optional<Ray> GenerateRay(const CameraSample &s, SampledWavelengths &, float *weight) const {
+        *weight = 1;
+        return GenerateRay(s);
+    }
     // Importance / pdfs for light tracing and BDPT (perspective cameras only).
     virtual bool SupportsLightTracing() const { return false; }
     virtual SampledSpectrum We(const Ray &, Vec2f *) const { return SampledSpectrum(0.f); }

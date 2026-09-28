@@ -116,7 +116,7 @@ SampledSpectrum Vertex::Le(const Scene &scene, const Vertex &v, const SampledWav
     w = Normalize(w);
     if (IsInfiniteLight()) {
         SampledSpectrum Le(0.f);
-        for (const Light *light : scene.infiniteLights) Le += light->Le(Ray(p(), -w), lambda);
+        for (const Light *inf : scene.infiniteLights) Le += inf->Le(Ray(p(), -w), lambda);
         return Le;
     }
     const Light *l = AreaLight();
@@ -171,7 +171,7 @@ static int RandomWalk(BDPTContext &ctx, Ray ray, SampledSpectrum beta, float pdf
         bool scattered = false;
         float tScatter = 0;
         if (medium) {
-            auto ds = medium->SampleDistance(si ? tHit : Infinity, ctx.sampler.Get1D(), ctx.lambda);
+            auto ds = medium->SampleDistance(ray, si ? tHit : Infinity, ctx.sampler.Get1D(), ctx.lambda);
             beta *= ds.weight;
             scattered = ds.scattered;
             tScatter = ds.t;
@@ -213,17 +213,12 @@ static int RandomWalk(BDPTContext &ctx, Ray ray, SampledSpectrum beta, float pdf
                 ray = si->SpawnRay(ray.d);
                 continue;
             }
-            MaterialEvalContext mctx;
-            mctx.p = si->p;
-            mctx.uv = si->uv;
-            mctx.wo = si->wo;
-            mctx.n = si->n;
-            mctx.ns = si->shading.n;
-            mctx.dpdus = si->shading.dpdu;
             vertex = Vertex();
             vertex.type = VertexType::Surface;
             vertex.si = *si;
-            vertex.bsdf = si->primitive->material ? si->primitive->material->GetBSDF(mctx, ctx.lambda, ctx.buf) : BSDF();
+            vertex.bsdf = si->primitive->material
+                              ? EvaluateSurface(*si->primitive->material, vertex.si, ctx.lambda, ctx.buf)
+                              : BSDF();
             vertex.beta = beta;
             vertex.pdfFwd = prev.ConvertDensity(pdfFwd, vertex);
             if (++bounces >= maxDepth) break;
@@ -234,13 +229,13 @@ static int RandomWalk(BDPTContext &ctx, Ray ray, SampledSpectrum beta, float pdf
             auto bs = vertex.bsdf.Sample_f(wo, uc, u2, mode);
             if (!bs) break;
             pdfFwd = bs->pdfIsProportional ? vertex.bsdf.PDF(wo, bs->wi, mode) : bs->pdf;
-            beta *= bs->f * (AbsDot(bs->wi, si->shading.n) / bs->pdf);
+            beta *= bs->f * (AbsDot(bs->wi, vertex.si.shading.n) / bs->pdf);
             pdfRev = vertex.bsdf.PDF(bs->wi, wo, !mode);
             if (bs->IsSpecular()) {
                 vertex.delta = true;
                 pdfRev = pdfFwd = 0;
             }
-            beta *= CorrectShadingNormal(*si, wo, bs->wi, mode);
+            beta *= CorrectShadingNormal(vertex.si, wo, bs->wi, mode);
             ray = si->SpawnRay(bs->wi);
             medium = si->GetMedium(bs->wi);
         }
@@ -474,7 +469,8 @@ bool BDPTIntegrator::Render(const Scene &scene, Film &film, RenderControl &contr
         }
         film.AddSample(pFilm, L, lambda);
         d.buf.Reset();
-    });
+    }, err);
+    if (spp < 0) return false;
     *scale = spp > 0 ? 1.0 / spp : 0.0;
     return true;
 }

@@ -66,9 +66,12 @@ static bool ReadPFM(const std::string &path, Image *out, std::string *err) {
     return true;
 }
 
+bool ReadEXR(const std::string &path, Image *out, std::string *err);  // exr_read.cpp
+
 bool ReadImage(const std::string &path, TextureEncoding enc, Image *out, std::string *err) {
     std::string ext = Extension(path);
     if (ext == ".pfm") return ReadPFM(path, out, err);
+    if (ext == ".exr") return ReadEXR(path, out, err);
     int w, h, n;
     if (ext == ".hdr") {
         float *d = stbi_loadf(path.c_str(), &w, &h, &n, 3);
@@ -84,6 +87,34 @@ bool ReadImage(const std::string &path, TextureEncoding enc, Image *out, std::st
     unsigned char *d = stbi_load(path.c_str(), &w, &h, &n, 3);
     if (!d) {
         *err = std::string("failed to read ") + path + ": " + stbi_failure_reason();
+        return false;
+    }
+    float lut[256];
+    for (int i = 0; i < 256; ++i) lut[i] = enc == TextureEncoding::sRGB ? SRGBDecode(i / 255.f) : i / 255.f;
+    *out = Image(w, h);
+    auto &dst = out->Data();
+    for (size_t i = 0; i < size_t(w) * h * 3; ++i) dst[i] = lut[d[i]];
+    stbi_image_free(d);
+    return true;
+}
+
+bool ReadImageFromMemory(const unsigned char *data, size_t size, TextureEncoding enc, Image *out, std::string *err) {
+    int w, h, n;
+    int len = int(std::min<size_t>(size, size_t(INT32_MAX)));
+    if (stbi_is_hdr_from_memory(data, len)) {
+        float *d = stbi_loadf_from_memory(data, len, &w, &h, &n, 3);
+        if (!d) {
+            *err = std::string("image decode failed: ") + stbi_failure_reason();
+            return false;
+        }
+        *out = Image(w, h);
+        std::memcpy(out->Data().data(), d, sizeof(float) * size_t(w) * h * 3);
+        stbi_image_free(d);
+        return true;
+    }
+    unsigned char *d = stbi_load_from_memory(data, len, &w, &h, &n, 3);
+    if (!d) {
+        *err = std::string("image decode failed: ") + stbi_failure_reason();
         return false;
     }
     float lut[256];

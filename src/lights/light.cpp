@@ -87,8 +87,42 @@ void DiffuseAreaLight::PDF_Le(const Ray &ray, const Vec3f &n, float *pdfPos, flo
     }
 }
 
+std::optional<LightBounds> DiffuseAreaLight::Bounds() const {
+    LightBounds lb;
+    lb.bounds = shape_->Bounds();
+    Vec3f w;
+    float cosTheta;
+    shape_->NormalBounds(&w, &cosTheta);
+    lb.w = w;
+    lb.cosTheta_o = cosTheta;
+    // Emission spreads over the hemisphere (or a narrower cos^n lobe, conservatively bounded).
+    lb.cosTheta_e = 0;
+    lb.twoSided = twoSided_;
+    lb.phi = scale_ * Lemit_->MaxValue() * shape_->Area() * Pi * (twoSided_ ? 2 : 1);
+    return lb;
+}
+
 // ---------------------------------------------------------------------------------------------
 // Point light
+
+std::optional<LightBounds> PointLight::Bounds() const {
+    LightBounds lb;
+    lb.bounds = Bounds3f(p_);
+    lb.phi = 4 * Pi * scale_ * I_->MaxValue();
+    lb.cosTheta_o = -1;
+    lb.cosTheta_e = 0;
+    return lb;
+}
+
+std::optional<LightBounds> SpotLight::Bounds() const {
+    LightBounds lb;
+    lb.bounds = Bounds3f(p_);
+    lb.w = frame_.z;
+    lb.phi = 4 * Pi * scale_ * I_->MaxValue();
+    lb.cosTheta_o = cosFalloffStart_;
+    lb.cosTheta_e = std::cos(SafeACos(cosFalloffEnd_) - SafeACos(cosFalloffStart_));
+    return lb;
+}
 
 std::optional<LightLiSample> PointLight::SampleLi(const LightSampleContext &ctx, Vec2f,
                                                   const SampledWavelengths &lambda) const {

@@ -13,6 +13,63 @@ BSDF Material::GetBSDF(const MaterialEvalContext &ctx, SampledWavelengths &lambd
     return BSDF(ctx.ns, ctx.dpdus, bxdf);
 }
 
+bool Material::PerturbShading(MaterialEvalContext &ctx) const {
+    Vec3f ns = ctx.ns;
+    bool changed = false;
+    if (bumpMap_.height) {
+        // Finite-difference gradient of the height field in uv space.
+        const float du = 1.f / 2048, dv = 1.f / 2048;
+        TextureEvalContext c0 = ctx, cu = ctx, cv = ctx;
+        cu.uv.x += du;
+        cu.p = ctx.p + ctx.dpdu * du;
+        cv.uv.y += dv;
+        cv.p = ctx.p + ctx.dpdv * dv;
+        float h0 = bumpMap_.height->Evaluate(c0);
+        float dhdu = (bumpMap_.height->Evaluate(cu) - h0) / du * bumpMap_.scale;
+        float dhdv = (bumpMap_.height->Evaluate(cv) - h0) / dv * bumpMap_.scale;
+        Vec3f dpdu = ctx.dpdu + ns * dhdu, dpdv = ctx.dpdv + ns * dhdv;
+        Vec3f n = Cross(dpdu, dpdv);
+        float l = Length(n);
+        if (l > 0 && std::isfinite(l)) {
+            n = n / l;
+            if (Dot(n, ns) < 0) n = -n;
+            ns = n;
+            ctx.dpdus = dpdu;
+            changed = true;
+        }
+    }
+    if (normalMap_.image) {
+        RGB c = normalMap_.image->Lookup(normalMap_.mapping.Map(ctx.uv));
+        Vec3f t(2 * c.r - 1, 2 * c.g - 1, 2 * c.b - 1);
+        t.x *= normalMap_.strength;
+        t.y *= normalMap_.flipGreen ? -normalMap_.strength : normalMap_.strength;
+        Frame f = Frame::FromXZ(ctx.dpdus, ns);
+        // Bitangent follows the v direction of the parameterization.
+        if (Dot(f.y, ctx.dpdv) < 0) f.y = -f.y;
+        Vec3f n = f.x * t.x + f.y * t.y + f.z * std::max(t.z, 1e-3f);
+        float l = Length(n);
+        if (l > 0 && std::isfinite(l)) {
+            ns = n / l;
+            changed = true;
+        }
+    }
+    if (!changed) return false;
+    // Keep the shading normal in the geometric hemisphere.
+    if (Dot(ns, ctx.n) < 0) ns = -ns;
+    ctx.ns = ns;
+    ctx.dpdus = ctx.dpdus - ns * Dot(ctx.dpdus, ns);
+    return true;
+}
+
+BSDF EvaluateSurface(const Material &m, SurfaceInteraction &si, SampledWavelengths &lambda, ScratchBuffer &buf) {
+    MaterialEvalContext ctx = MaterialEvalContext::From(si);
+    if (m.PerturbShading(ctx)) {
+        si.shading.n = ctx.ns;
+        si.shading.dpdu = ctx.dpdus;
+    }
+    return m.GetBSDF(ctx, lambda, buf);
+}
+
 const BxDF *DiffuseMaterial::GetBxDF(const MaterialEvalContext &ctx, SampledWavelengths &lambda,
                                      ScratchBuffer &buf) const {
     SampledSpectrum r = reflectance_->Evaluate(ctx, lambda);

@@ -38,6 +38,9 @@ enum class TextureEncoding { sRGB, Linear };
 // float formats (.hdr, .pfm) are always linear.
 bool ReadImage(const std::string &path, TextureEncoding enc, Image *out, std::string *err);
 
+// Decode an encoded image (PNG, JPEG, HDR, ...) held in memory.
+bool ReadImageFromMemory(const unsigned char *data, size_t size, TextureEncoding enc, Image *out, std::string *err);
+
 // Write linear float RGB (EXR: float32 uncompressed scanlines; PFM).
 bool WriteEXR(const std::string &path, const Image &img, bool half, std::string *err);
 bool WritePFM(const std::string &path, const Image &img, std::string *err);

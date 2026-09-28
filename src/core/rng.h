@@ -50,6 +50,15 @@ class RNG {
         return {a, b};
     }
 
+    void GetState(uint64_t *state, uint64_t *inc) const {
+        *state = state_;
+        *inc = inc_;
+    }
+    void SetState(uint64_t state, uint64_t inc) {
+        state_ = state;
+        inc_ = inc;
+    }
+
   private:
     uint64_t state_, inc_;
 };

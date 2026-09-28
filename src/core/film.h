@@ -2,6 +2,7 @@
 
 #include "core/color.h"
 #include "core/image.h"
+#include "core/serialize.h"
 #include "core/spectrum.h"
 
 #include <atomic>
@@ -62,6 +63,9 @@ class Film {
                    float weight = 1.f);
     void AddXYZ(Vec2f pRaster, const XYZ &xyz);
     void Clear();
+    // Checkpointing of the raw accumulators.
+    void Serialize(BinaryWriter &w) const;
+    bool Deserialize(BinaryReader &r);
 
     // Resolve accumulated values times 'scale' to linear RGB in the film colour space.
     Image Resolve(double scale) const;

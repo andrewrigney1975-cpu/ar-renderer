@@ -8,7 +8,8 @@
 
   "rigs": {
     "studio": "rigs/studio.json",
-    "fog": "rigs/fog.json"
+    "fog": "rigs/fog.json",
+    "daylight": "rigs/daylight.json"
   },
   "active_rigs": ["studio"],
 
@@ -41,6 +42,8 @@
   "cameras": {
     "main":  { "type": "thin_lens", "position": [3.6, 2.4, 5.6], "look_at": [0, 0.85, 0], "fov_y": 30,
                "f_stop": 4, "focus_on": [0, 0.8, 0.6] },
+    "lens":  { "type": "realistic", "lens": "dgauss50", "position": [3.6, 2.4, 5.6], "look_at": [0, 0.85, 0],
+               "focus_on": [0, 0.8, 0.6], "aperture_diameter_mm": 8, "film_diagonal_mm": 30, "dispersion": true },
     "top":   { "type": "orthographic", "position": [0, 10, 0], "look_at": [0, 0, 0], "up": [0, 0, -1], "ortho_height": 5 },
     "front": { "type": "orthographic", "position": [0, 1.2, 10], "look_at": [0, 1.2, 0], "ortho_height": 4 },
     "side":  { "type": "orthographic", "position": [10, 1.2, 0], "look_at": [0, 1.2, 0], "ortho_height": 4 }

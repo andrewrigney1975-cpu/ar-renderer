@@ -9,8 +9,12 @@
 #include <mutex>
 
 #ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include <windows.h>
 #undef RGB
 #endif
@@ -40,7 +44,7 @@ struct FitTables {
 };
 
 const FitTables &GetFitTables() {
-    static const FitTables t = [] {
+    static const FitTables tables = [] {
         FitTables t{};
         const Mat3 &adapt = SpectralWhiteAdaptation();
         const Mat3 toRGB = XYZToRGBMatrix(ColorSpaceId::sRGB) * adapt;
@@ -65,7 +69,7 @@ const FitTables &GetFitTables() {
         for (int i = 0; i < 3; ++i) t.xyzWhite[i] = t.rgbToXyz[i][0] + t.rgbToXyz[i][1] + t.rgbToXyz[i][2];
         return t;
     }();
-    return t;
+    return tables;
 }
 
 void CieLab(const FitTables &t, double *p) {

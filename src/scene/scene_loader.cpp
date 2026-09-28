@@ -3,6 +3,8 @@
 #include "core/fsutil.h"
 #include "core/log.h"
 #include "core/rgb2spec.h"
+#include "scene/importers.h"
+#include "cameras/realistic.h"
 
 #include "nlohmann/json.hpp"
 
@@ -108,8 +110,26 @@ void MergeDocument(json &dst, const json &src) {
     }
 }
 
+bool IsForeignScene(const fs::path &path) {
+    std::string ext = path.extension().string();
+    for (char &c : ext) c = char(std::tolower((unsigned char)c));
+    return ext == ".gltf" || ext == ".glb" || ext == ".pbrt";
+}
+
+json ImportForeign(const fs::path &path, const ImportOptions &opts) {
+    std::string ext = path.extension().string();
+    for (char &c : ext) c = char(std::tolower((unsigned char)c));
+    std::string err;
+    json doc = ext == ".pbrt" ? ImportPBRT(PathUtf8(path), opts, &err) : ImportGLTF(PathUtf8(path), opts, &err);
+    if (doc.is_null()) Fail(err);
+    return doc;
+}
+
+void ApplyImportTransform(json &doc, const json &xfJson);  // defined after ParseTransform
+
 json LoadComposed(const fs::path &path, int depth = 0) {
     if (depth > 16) Fail("include depth exceeded at " + PathUtf8(path));
+    if (IsForeignScene(path)) return ImportForeign(path, ImportOptions());
     json doc = ReadJsonFile(path);
     json result = json::object();
     if (doc.contains("include")) {
@@ -117,6 +137,21 @@ json LoadComposed(const fs::path &path, int depth = 0) {
             fs::path p = Utf8Path(inc.get<std::string>());
             if (p.is_relative()) p = path.parent_path() / p;
             MergeDocument(result, LoadComposed(p, depth + 1));
+        }
+    }
+    if (doc.contains("import")) {
+        // Foreign scenes (glTF, pbrt) or other scene files, placed with an optional transform.
+        for (const auto &imp : doc["import"]) {
+            json spec = imp.is_string() ? json{{"file", imp}} : imp;
+            fs::path p = Utf8Path(spec.at("file").get<std::string>());
+            if (p.is_relative()) p = path.parent_path() / p;
+            ImportOptions io;
+            if (spec.contains("light_scale")) io.lightScale = spec["light_scale"].get<float>();
+            if (spec.contains("emission_scale")) io.emissionScale = spec["emission_scale"].get<float>();
+            json sub = IsForeignScene(p) ? ImportForeign(p, io) : LoadComposed(p, depth + 1);
+            if (spec.contains("transform")) ApplyImportTransform(sub, spec["transform"]);
+            sub.erase("render");  // the importing scene owns the render settings
+            MergeDocument(result, sub);
         }
     }
     MergeDocument(result, doc);
@@ -298,6 +333,40 @@ Transform ParseTransform(const json &j) {
     return T * R * S;
 }
 
+json MatrixJson(const Mat4 &m) {
+    json a = json::array();
+    for (int i = 0; i < 4; ++i)
+        for (int k = 0; k < 4; ++k) a.push_back(m.m[i][k]);
+    return a;
+}
+
+json VecJson(const Vec3f &v) { return json::array({v.x, v.y, v.z}); }
+
+void ApplyImportTransform(json &doc, const json &xfJson) {
+    Transform T = ParseTransform(xfJson);
+    if (doc.contains("objects"))
+        for (auto &o : doc["objects"]) {
+            Transform M = T * ParseTransform(o.contains("transform") ? o["transform"] : json());
+            o["transform"] = {{"matrix", MatrixJson(M.Matrix())}};
+        }
+    auto fix = [&](json &e) {
+        for (const char *k : {"position", "look_at", "focus_on"})
+            if (e.contains(k)) e[k] = VecJson(T.Point(ParseVec3(e[k], k)));
+        for (const char *k : {"up", "direction"})
+            if (e.contains(k)) e[k] = VecJson(T.Vector(ParseVec3(e[k], k)));
+    };
+    for (const char *sec : {"cameras", "lights"})
+        if (doc.contains(sec))
+            for (auto &e : doc[sec]) fix(e);
+    if (doc.contains("import_bounds") && doc["import_bounds"].size() == 2) {
+        Bounds3f b(ParseVec3(doc["import_bounds"][0], "bounds"), ParseVec3(doc["import_bounds"][1], "bounds"));
+        Bounds3f o;
+        if (!b.IsEmpty())
+            for (int i = 0; i < 8; ++i) o = Union(o, T.Point(Vec3f(b[i & 1].x, b[(i >> 1) & 1].y, b[(i >> 2) & 1].z)));
+        doc["import_bounds"] = {VecJson(o.pMin), VecJson(o.pMax)};
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 
 struct ObjectRecord {
@@ -361,25 +430,39 @@ class Loader {
     std::shared_ptr<Material> blackMaterial_;
     std::vector<ObjectRecord> objects_;
     std::vector<std::pair<int, EmissionSpec>> pendingEmission_;
+    std::vector<GridMedium *> gridMedia_;
 };
 
 std::shared_ptr<const ImageData> Loader::GetImage(const json &tex, const std::string &id) {
     std::string file = GetString(tex, "file", "");
+    int embedded = -1;
+    if (tex.contains("gltf")) {
+        file = GetString(tex, "gltf", "");
+        embedded = int(GetFloat(tex, "image", 0));
+    }
     if (file.empty()) Fail("texture '" + id + "': missing 'file'");
     std::string cs = GetString(tex, "colorspace", "srgb");
     TextureEncoding enc = (cs == "srgb" || cs == "sRGB") ? TextureEncoding::sRGB : TextureEncoding::Linear;
     std::string wrapS = GetString(tex, "wrap", "repeat");
     WrapMode wrap = wrapS == "clamp" ? WrapMode::Clamp : (wrapS == "mirror" ? WrapMode::Mirror : WrapMode::Repeat);
     bool flip = GetBool(tex, "flip_v", true);
-    std::string key = file + "|" + cs + "|" + wrapS + (flip ? "|f" : "|n");
+    std::string key = file + "#" + std::to_string(embedded) + "|" + cs + "|" + wrapS + (flip ? "|f" : "|n");
     auto it = imageCache_.find(key);
     if (it != imageCache_.end()) return it->second;
     Image img;
     std::string err;
-    if (!ReadImage(file, enc, &img, &err)) Fail("texture '" + id + "': " + err);
+    bool ok = embedded >= 0 ? LoadGLTFImage(file, embedded, enc, &img, &err) : ReadImage(file, enc, &img, &err);
+    if (!ok) Fail("texture '" + id + "': " + err);
     auto data = std::make_shared<const ImageData>(std::move(img), wrap, flip);
     imageCache_[key] = data;
     return data;
+}
+
+static FloatTexturePtr MakeNoise(const json &t) {
+    Vec3f offset = t.contains("offset") ? ParseVec3(t["offset"], "noise.offset") : Vec3f();
+    return std::make_shared<NoiseFloatTexture>(GetFloat(t, "frequency", 4.f), int(GetFloat(t, "octaves", 5)),
+                                               GetBool(t, "turbulence", false), GetString(t, "space", "world") == "world",
+                                               offset);
 }
 
 static UVMapping ParseUVMapping(const json &t) {
@@ -404,11 +487,16 @@ SpectrumTexturePtr Loader::GetSpectrumTexture(const json &v, SpectrumType type, 
         std::string ttype = GetString(t, "type", "image");
         SpectrumTexturePtr tex;
         if (ttype == "image") {
-            tex = std::make_shared<ImageSpectrumTexture>(GetImage(t, id), ParseUVMapping(t), type, GetFloat(t, "multiplier", 1.f));
+            RGB mult = t.contains("multiplier") ? ParseRGB(t["multiplier"], "multiplier") : RGB(1, 1, 1);
+            tex = std::make_shared<ImageSpectrumTexture>(GetImage(t, id), ParseUVMapping(t), type, mult);
         } else if (ttype == "checker") {
             json a = t.contains("a") ? t["a"] : json(0.8), b = t.contains("b") ? t["b"] : json(0.2);
             tex = std::make_shared<CheckerSpectrumTexture>(GetSpectrumTexture(a, type, what), GetSpectrumTexture(b, type, what),
                                                            ParseUVMapping(t));
+        } else if (ttype == "noise") {
+            json a = t.contains("a") ? t["a"] : json(0.0), b = t.contains("b") ? t["b"] : json(1.0);
+            tex = std::make_shared<MixSpectrumTexture>(GetSpectrumTexture(a, type, what), GetSpectrumTexture(b, type, what),
+                                                       MakeNoise(t));
         } else if (ttype == "constant") {
             tex = GetSpectrumTexture(t["value"], type, what);
         } else {
@@ -444,6 +532,13 @@ FloatTexturePtr Loader::GetFloatTexture(const json &v, const char *what) {
             auto fa = a.is_number() ? GetFloatTexture(a, what) : GetFloatTexture(json(ParseRGB(a, what).Max()), what);
             auto fb = b.is_number() ? GetFloatTexture(b, what) : GetFloatTexture(json(ParseRGB(b, what).Max()), what);
             tex = std::make_shared<CheckerFloatTexture>(fa, fb, ParseUVMapping(t));
+        } else if (ttype == "noise") {
+            if (t.contains("a") || t.contains("b")) {
+                json a = t.contains("a") ? t["a"] : json(0.0), b = t.contains("b") ? t["b"] : json(1.0);
+                tex = std::make_shared<MixFloatTexture>(GetFloatTexture(a, what), GetFloatTexture(b, what), MakeNoise(t));
+            } else {
+                tex = MakeNoise(t);
+            }
         } else if (ttype == "constant") {
             tex = GetFloatTexture(t["value"], what);
         } else {
@@ -457,7 +552,8 @@ FloatTexturePtr Loader::GetFloatTexture(const json &v, const char *what) {
 
 std::shared_ptr<Medium> Loader::ParseMedium(const json &j, const std::string &name) {
     std::string type = GetString(j, "type", "homogeneous");
-    if (type != "homogeneous") Fail("medium '" + name + "': only 'homogeneous' media are supported");
+    if (type != "homogeneous" && type != "grid" && type != "noise")
+        Fail("medium '" + name + "': unknown type '" + type + "' (homogeneous, grid, noise)");
     float g = GetFloat(j, "g", 0.f);
     float scale = GetFloat(j, "scale", 1.f);
     SpectrumPtr sa, ss;
@@ -483,7 +579,35 @@ std::shared_ptr<Medium> Loader::ParseMedium(const json &j, const std::string &na
         ss = j.contains("sigma_s") ? ParseSpectrum(j["sigma_s"], SpectrumType::Unbounded, "sigma_s")
                                    : std::make_shared<ConstantSpectrum>(0.f);
     }
-    auto m = std::make_shared<Medium>(sa, ss, scale, g);
+    std::shared_ptr<Medium> m;
+    if (type == "homogeneous") {
+        m = std::make_shared<HomogeneousMedium>(sa, ss, scale, g);
+    } else {
+        std::shared_ptr<DensityField> field;
+        if (type == "grid") {
+            std::string err, file = GetString(j, "file", "");
+            std::string ext = Utf8Path(file).extension().string();
+            for (char &c : ext) c = char(std::tolower((unsigned char)c));
+            if (ext == ".nvdb") field = LoadNanoVDB(file, GetString(j, "grid", "density"), &err);
+            else field = VoxelGridField::LoadVol(file, &err);
+            if (!field && ext == ".nvdb" && !j.contains("grid")) field = LoadNanoVDB(file, "", &err);
+            if (!field) Fail("medium '" + name + "': " + err);
+        } else {
+            Vec3f offset = j.contains("offset") ? ParseVec3(j["offset"], "offset") : Vec3f();
+            auto noise = std::make_shared<NoiseField>(GetFloat(j, "frequency", 1.5f), int(GetFloat(j, "octaves", 5)),
+                                                      GetFloat(j, "threshold", 0.45f), GetFloat(j, "sharpness", 4.f),
+                                                      GetString(j, "falloff", "ellipsoid") == "ellipsoid", offset);
+            field = noise;
+        }
+        if (j.contains("bounds")) {
+            const json &b = j["bounds"];
+            field->bounds = Bounds3f(ParseVec3(b[0], "bounds"), ParseVec3(b[1], "bounds"));
+        }
+        auto gm = std::make_shared<GridMedium>(sa, ss, scale * GetFloat(j, "density_scale", 1.f), g, field,
+                                               ParseTransform(j.contains("transform") ? j["transform"] : json()));
+        gridMedia_.push_back(gm.get());
+        m = gm;
+    }
     m->name = name;
     return m;
 }
@@ -603,6 +727,27 @@ std::shared_ptr<Material> Loader::ParseMaterial(const json &j, const std::string
             sp.weight = GetFloat(s, "weight", 1.f);
             m->SetSheen(sp);
         }
+        if (j.contains("normal_map")) {
+            const json &nm = j["normal_map"];
+            std::string tid = nm.is_string() ? nm.get<std::string>() : GetString(nm, "texture", "");
+            if (!doc_["textures"].contains(tid)) Fail("material '" + id + "': unknown normal map texture '" + tid + "'");
+            json t = doc_["textures"][tid];
+            t["colorspace"] = "linear";  // normal maps are data
+            NormalMapParams np;
+            np.image = GetImage(t, tid);
+            np.mapping = ParseUVMapping(t);
+            np.strength = nm.is_object() ? GetFloat(nm, "strength", 1.f) : 1.f;
+            np.flipGreen = nm.is_object() && GetBool(nm, "flip_green", false);
+            m->SetNormalMap(np);
+        }
+        if (j.contains("bump_map")) {
+            const json &bm = j["bump_map"];
+            BumpMapParams bp;
+            json ref = bm.contains("texture") ? json{{"texture", bm["texture"]}, {"channel", GetString(bm, "channel", "avg")}} : bm["height"];
+            bp.height = GetFloatTexture(ref, "bump_map");
+            bp.scale = GetFloat(bm, "scale", 0.01f);
+            m->SetBumpMap(bp);
+        }
     }
     if (j.contains("medium")) materialInterior_[id] = GetMedium(j["medium"].get<std::string>());
     if (j.contains("emission")) {
@@ -694,9 +839,41 @@ void Loader::AddObject(const json &o, int index) {
             mesh = MakeBoxMesh(g.contains("size") ? ParseVec3(g["size"], "size") : Vec3f(1, 1, 1));
         } else if (gtype == "disk") {
             mesh = MakeDiskMesh(GetFloat(g, "radius", 1.f), int(GetFloat(g, "segments", 64)));
+        } else if (gtype == "mesh" && g.contains("positions")) {
+            // Inline mesh data (flat arrays), as written by the pbrt importer.
+            mesh = std::make_shared<TriangleMesh>();
+            const json &P = g["positions"];
+            for (size_t i = 0; i + 2 < P.size(); i += 3)
+                mesh->p.push_back({P[i].get<float>(), P[i + 1].get<float>(), P[i + 2].get<float>()});
+            if (g.contains("indices"))
+                for (const auto &v : g["indices"]) mesh->indices.push_back(v.get<int>());
+            else
+                for (int i = 0; i < int(mesh->p.size()); ++i) mesh->indices.push_back(i);
+            if (g.contains("normals")) {
+                const json &N = g["normals"];
+                for (size_t i = 0; i + 2 < N.size(); i += 3)
+                    mesh->n.push_back(Normalize(Vec3f(N[i].get<float>(), N[i + 1].get<float>(), N[i + 2].get<float>())));
+            }
+            if (g.contains("uvs")) {
+                const json &U = g["uvs"];
+                for (size_t i = 0; i + 1 < U.size(); i += 2) mesh->uv.push_back({U[i].get<float>(), U[i + 1].get<float>()});
+            }
+            if (mesh->n.size() != mesh->p.size()) mesh->n.clear();
+            if (mesh->uv.size() != mesh->p.size()) mesh->uv.clear();
+            mesh->indices.resize(mesh->indices.size() / 3 * 3);
+            for (int idx : mesh->indices)
+                if (idx < 0 || idx >= int(mesh->p.size())) Fail("geometry '" + gid + "': index out of range");
+            mesh->closed = GetBool(g, "closed", false);
         } else if (gtype == "mesh") {
             std::string err;
             auto loaded = LoadMesh(GetString(g, "file", ""), &err);
+            if (!loaded) Fail("geometry '" + gid + "': " + err);
+            mesh = std::make_shared<TriangleMesh>(*loaded);
+            mesh->closed = GetBool(g, "closed", false);
+        } else if (gtype == "gltf") {
+            std::string err;
+            auto loaded = LoadGLTFPrimitive(GetString(g, "file", ""), int(GetFloat(g, "mesh", 0)),
+                                            int(GetFloat(g, "primitive", 0)), &err);
             if (!loaded) Fail("geometry '" + gid + "': " + err);
             mesh = std::make_shared<TriangleMesh>(*loaded);
             mesh->closed = GetBool(g, "closed", false);
@@ -754,7 +931,22 @@ void Loader::AddLight(const std::string &id, const json &l) {
         Vec3f pos = ParseVec3(l.at("position"), "position");
         float scale = GetFloat(l, "intensity", 1.f) * scaleMul;
         std::shared_ptr<Light> light;
-        if (type == "point") {
+        if (type == "point" && l.contains("ies")) {
+            // Goniometric light: the IES nadir (0 degrees) points along 'direction' (default down).
+            std::string err;
+            auto profile = IESProfile::Load(GetString(l, "ies", ""), &err);
+            if (!profile) Fail("light '" + id + "': " + err);
+            Vec3f dir = l.contains("look_at") ? ParseVec3(l["look_at"], "look_at") - pos
+                                              : (l.contains("direction") ? ParseVec3(l["direction"], "direction") : Vec3f(0, -1, 0));
+            Frame f = Frame::FromZ(Normalize(dir));
+            float rot = Radians(GetFloat(l, "rotation", 0.f));
+            Vec3f x = f.x * std::cos(rot) + f.y * std::sin(rot);
+            f = Frame::FromXZ(x, f.z);
+            // 'intensity' scales the normalized profile; "photometric": true uses the file's candela.
+            if (GetBool(l, "photometric", false)) scale *= profile->PeakCandela();
+            if (l.contains("power")) scale = GetFloat(l, "power", 1.f) / (profile->Integral() * SpectrumToY(*I));
+            light = std::make_shared<GoniometricLight>(pos, f, profile, I, scale);
+        } else if (type == "point") {
             if (l.contains("power")) scale = GetFloat(l, "power", 1.f) / (4 * Pi * SpectrumToY(*I));
             light = std::make_shared<PointLight>(pos, I, scale);
         } else {
@@ -764,6 +956,36 @@ void Loader::AddLight(const std::string &id, const json &l) {
         }
         light->medium = EnclosingMedium(pos, -1);
         scene_->lights.push_back(light);
+        return;
+    }
+    if (type == "distant" || type == "directional") {
+        Vec3f dir = l.contains("look_at") && l.contains("position")
+                        ? ParseVec3(l["look_at"], "look_at") - ParseVec3(l["position"], "position")
+                        : (l.contains("direction") ? ParseVec3(l["direction"], "direction") : Vec3f(0, -1, 0));
+        // 'direction' is the direction the light travels; the light arrives from -direction.
+        float scale = GetFloat(l, "irradiance", GetFloat(l, "intensity", 1.f)) * scaleMul;
+        scene_->lights.push_back(std::make_shared<DistantLight>(-Normalize(dir), emissionSpectrum(), scale));
+        return;
+    }
+    if (type == "sun_sky" || type == "sun") {
+        Vec3f sunDir;
+        if (l.contains("sun_direction")) sunDir = Normalize(ParseVec3(l["sun_direction"], "sun_direction"));
+        else {
+            float el = Radians(GetFloat(l, "elevation", 45.f)), az = Radians(GetFloat(l, "azimuth", 0.f));
+            sunDir = Vec3f(std::cos(el) * std::sin(az), std::sin(el), std::cos(el) * std::cos(az));
+        }
+        float turbidity = GetFloat(l, "turbidity", 3.f);
+        // Physical units are kcd/m^2; the default scale brings a sunlit white surface near 1.
+        float scale = GetFloat(l, "intensity", 0.03f) * scaleMul;
+        float radius = 0.2665f * GetFloat(l, "sun_size", 1.f);
+        if (sunDir.y > -0.02f && GetFloat(l, "sun_scale", 1.f) > 0)
+            scene_->lights.push_back(std::make_shared<SunLight>(sunDir, radius, MakeSunRadiance(sunDir, turbidity, radius),
+                                                                scale * GetFloat(l, "sun_scale", 1.f)));
+        if (type == "sun_sky") {
+            int res = int(GetFloat(l, "resolution", 512));
+            auto sky = MakePreethamSky(sunDir, turbidity, GetFloat(l, "ground_albedo", 0.3f), res, res / 2);
+            scene_->lights.push_back(std::make_shared<EnvironmentLight>(sky, scale * GetFloat(l, "sky_scale", 1.f), 0.f));
+        }
         return;
     }
     if (type == "environment" || type == "env" || type == "sky") {
@@ -898,12 +1120,23 @@ void Loader::ParseCamera() {
     scene_->settings.cameraName = name;
     const json &c = cams[name];
     std::string type = GetString(c, "type", "perspective");
-    Vec3f pos = ParseVec3(c.at("position"), "camera.position");
-    Vec3f target = c.contains("look_at") ? ParseVec3(c["look_at"], "camera.look_at")
-                                         : pos + ParseVec3(c.at("direction"), "camera.direction");
-    Vec3f up = c.contains("up") ? ParseVec3(c["up"], "camera.up") : Vec3f(0, 1, 0);
     CameraParams p;
-    p.cameraToWorld = Transform::LookAt(pos, target, up);
+    Vec3f pos, target;
+    if (c.contains("matrix")) {
+        // Explicit camera-to-world matrix (row-major); camera space is +x right, +y up, +z forward.
+        const json &m = c["matrix"];
+        if (!m.is_array() || m.size() != 16) Fail("camera '" + name + "': matrix must have 16 numbers");
+        Mat4 mat;
+        for (int i = 0; i < 16; ++i) mat.m[i / 4][i % 4] = m[i].get<float>();
+        p.cameraToWorld = Transform(mat);
+        pos = p.cameraToWorld.Point(Vec3f());
+        target = pos + p.cameraToWorld.Vector(Vec3f(0, 0, 1));
+    } else {
+        pos = ParseVec3(c.at("position"), "camera.position");
+        target = c.contains("look_at") ? ParseVec3(c["look_at"], "camera.look_at") : pos + ParseVec3(c.at("direction"), "camera.direction");
+        Vec3f up = c.contains("up") ? ParseVec3(c["up"], "camera.up") : Vec3f(0, 1, 0);
+        p.cameraToWorld = Transform::LookAt(pos, target, up);
+    }
     const FilmSettings &fs = scene_->settings.film;
     Filter filter(fs.filter);
     CameraFilmInfo info{fs.width, fs.height, int(std::ceil(filter.Radius() - 0.5f))};
@@ -919,7 +1152,23 @@ void Loader::ParseCamera() {
     }
     if (type == "pinhole") p.lensRadius = 0;
     p.orthoHeight = GetFloat(c, "ortho_height", 2.f);
-    if (type == "orthographic" || type == "ortho") scene_->camera = std::make_unique<OrthographicCamera>(p, info);
+    if (type == "realistic") {
+        // Lens prescription in millimetres; 'units_per_meter' converts to scene units.
+        float unitsPerMm = GetFloat(c, "units_per_meter", 1.f) / 1000.f;
+        std::vector<LensElement> lens;
+        std::string lensName = GetString(c, "lens", "dgauss50");
+        if (lensName == "dgauss50") lens = RealisticCamera::DoubleGauss50(unitsPerMm);
+        else {
+            std::string err;
+            if (!RealisticCamera::LoadLensFile(lensName, unitsPerMm, &lens, &err)) Fail("camera '" + name + "': " + err);
+        }
+        if (c.contains("aperture_diameter_mm"))
+            for (auto &e : lens)
+                if (e.curvatureRadius == 0) e.apertureRadius = GetFloat(c, "aperture_diameter_mm", 10.f) * unitsPerMm * 0.5f;
+        float diag = GetFloat(c, "film_diagonal_mm", 43.27f) * unitsPerMm;
+        scene_->camera = std::make_unique<RealisticCamera>(p.cameraToWorld, lens, diag, info, p.focalDistance,
+                                                           GetBool(c, "dispersion", false));
+    } else if (type == "orthographic" || type == "ortho") scene_->camera = std::make_unique<OrthographicCamera>(p, info);
     else if (type == "perspective" || type == "thin_lens" || type == "pinhole")
         scene_->camera = std::make_unique<PerspectiveCamera>(p, info);
     else Fail("camera '" + name + "': unknown type '" + type + "'");
@@ -968,6 +1217,11 @@ void Loader::ParseRender() {
         is.largeStepProbability = GetFloat(i, "large_step_probability", is.largeStepProbability);
         is.sigma = GetFloat(i, "sigma", is.sigma);
         is.russianRoulette = GetBool(i, "russian_roulette", is.russianRoulette);
+        if (i.contains("light_sampler")) {
+            std::string ls = GetString(i, "light_sampler", "bvh");
+            if (ls != "bvh" && ls != "power") Fail("light_sampler must be 'bvh' or 'power'");
+            is.lightBVH = ls == "bvh";
+        }
         if (i.contains("time_limit")) {
             const json &tl = i["time_limit"];
             if (tl.is_number()) is.timeLimit = tl.get<double>();
@@ -984,6 +1238,7 @@ void Loader::ParseRender() {
             if (o.contains("tonemap") && !ParseToneMap(o["tonemap"].get<std::string>(), &spec.toneMap))
                 Fail("unknown tonemap '" + o["tonemap"].get<std::string>() + "'");
             spec.half = GetBool(o, "half", false);
+            spec.aov = GetString(o, "aov", "");
         }
         if (!spec.file.empty()) rs.outputs.push_back(spec);
     }
@@ -1025,6 +1280,14 @@ std::unique_ptr<Scene> Loader::Load() {
     // The primitive array is final now, so area lights can safely point at medium interfaces.
     for (auto &[objIndex, spec] : pendingEmission_) AttachEmission(objects_[objIndex], spec);
     ResolveMedia();
+    // Unbounded heterogeneous media are bounded by the objects that contain them.
+    for (GridMedium *gm : gridMedia_) {
+        Bounds3f b;
+        for (const ObjectRecord &o : objects_)
+            if (o.interior == gm) b = Union(b, o.bounds);
+        gm->FitBoundsToWorld(b);
+        if (!gm->HasBounds()) Fail("medium '" + gm->name + "': heterogeneous media need 'bounds' or an enclosing object");
+    }
     ParseCamera();
     scene_->Build();
     if (scene_->lights.empty()) LogWarning("scene has no lights; the image will be black");
@@ -1033,10 +1296,59 @@ std::unique_ptr<Scene> Loader::Load() {
 
 } // namespace
 
+bool ConvertSceneToJson(const std::string &path, const std::string &outPath, std::string *err) {
+    try {
+        fs::path p = Utf8Path(path);
+        json doc = LoadComposed(p);
+        if (IsForeignScene(p)) {
+            Bounds3f b;
+            if (doc.contains("import_bounds") && doc["import_bounds"].size() == 2)
+                b = Bounds3f(ParseVec3(doc["import_bounds"][0], "bounds"), ParseVec3(doc["import_bounds"][1], "bounds"));
+            AddImportDefaults(doc, b);
+        }
+        // Annotate mesh geometry with object-space bounds (lets front ends draw meshes without
+        // parsing OBJ/PLY/glTF themselves).
+        if (doc.contains("geometry"))
+            for (auto &[gid, g] : doc["geometry"].items()) {
+                std::string type = g.value("type", "");
+                std::shared_ptr<TriangleMesh> mesh;
+                std::string e;
+                if (type == "gltf") mesh = LoadGLTFPrimitive(g.value("file", ""), g.value("mesh", 0), g.value("primitive", 0), &e);
+                else if (type == "mesh" && g.contains("file")) mesh = LoadMesh(g.value("file", ""), &e);
+                else if (type == "mesh" && g.contains("positions")) {
+                    Bounds3f bb;
+                    const json &P = g["positions"];
+                    for (size_t i = 0; i + 2 < P.size(); i += 3) bb = Union(bb, Vec3f(P[i].get<float>(), P[i + 1].get<float>(), P[i + 2].get<float>()));
+                    if (!bb.IsEmpty()) g["bounds"] = {VecJson(bb.pMin), VecJson(bb.pMax)};
+                }
+                if (mesh) {
+                    Bounds3f bb = mesh->Bounds();
+                    if (!bb.IsEmpty()) g["bounds"] = {VecJson(bb.pMin), VecJson(bb.pMax)};
+                }
+            }
+        std::ofstream out(Utf8Path(outPath), std::ios::binary);
+        if (!out) {
+            *err = "cannot write " + outPath;
+            return false;
+        }
+        out << doc.dump(2) << '\n';
+        return bool(out);
+    } catch (const std::exception &e) {
+        *err = e.what();
+        return false;
+    }
+}
+
 std::unique_ptr<Scene> LoadScene(const std::string &path, const LoadOptions &opts, std::string *err) {
     try {
         fs::path p = Utf8Path(path);
         json doc = LoadComposed(p);
+        if (IsForeignScene(p)) {
+            Bounds3f b;
+            if (doc.contains("import_bounds") && doc["import_bounds"].size() == 2)
+                b = Bounds3f(ParseVec3(doc["import_bounds"][0], "bounds"), ParseVec3(doc["import_bounds"][1], "bounds"));
+            AddImportDefaults(doc, b);
+        }
         Loader loader(std::move(doc), opts, p.parent_path());
         return loader.Load();
     } catch (const LoadError &e) {

@@ -230,6 +230,12 @@ public sealed class OrthoViewport
             DrawOutline(rc, ds, o, Color.FromArgb(140, 110, 150, 230), dashed: true);
             return;
         }
+        if (o.IsProxy)
+        {
+            FillShape(rc, ds, o, C(col, 90));
+            DrawOutline(rc, ds, o, highlight ? Microsoft.UI.Colors.White : C(col * 0.5f + new Vector3(0.35f), 220), dashed: false);
+            return;
+        }
         switch (o.Kind)
         {
             case ShapeKind.Sphere:

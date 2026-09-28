@@ -30,6 +30,9 @@ public sealed partial class MainWindow : Window
     private string? _outputDir;
     private string? _finalImage;
     private bool _suppressEvents;
+    private List<string>? _lastArgs;      // arguments of the last render (for Continue)
+    private double _lastSamples;
+    private string? _lastCheckpoint;
     private int _previewVersion;
 
     private static readonly (string Label, int W, int H)[] Resolutions =
@@ -63,7 +66,10 @@ public sealed partial class MainWindow : Window
 
         Closed += (_, _) => _job?.Dispose();
 
-        string? sample = RenderJob.LocateSampleScene();
+        // A scene path on the command line wins over the bundled sample.
+        string? fromArgs = Environment.GetCommandLineArgs().Skip(1)
+            .FirstOrDefault(a => !a.StartsWith("--", StringComparison.Ordinal) && File.Exists(a) && !a.EndsWith(".png", StringComparison.OrdinalIgnoreCase));
+        string? sample = fromArgs ?? RenderJob.LocateSampleScene();
         if (sample is not null) LoadScene(sample, resetUi: true);
         else StatusText.Text = "Open a scene to begin.";
     }
@@ -79,7 +85,8 @@ public sealed partial class MainWindow : Window
         try
         {
             List<string>? rigs = resetUi ? null : ActiveRigs();
-            var doc = SceneDocument.Load(path, rigs);
+            _rendererExe ??= RenderJob.LocateRenderer();
+            var doc = SceneDocument.Load(path, rigs, _rendererExe);
             _doc = doc;
             _scenePath = path;
             ScenePathText.Text = path;
@@ -173,6 +180,9 @@ public sealed partial class MainWindow : Window
         var picker = new FileOpenPicker();
         WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(this));
         picker.FileTypeFilter.Add(".json");
+        picker.FileTypeFilter.Add(".gltf");
+        picker.FileTypeFilter.Add(".glb");
+        picker.FileTypeFilter.Add(".pbrt");
         var file = await picker.PickSingleFileAsync();
         if (file is not null) LoadScene(file.Path, resetUi: true);
     }
@@ -292,6 +302,14 @@ public sealed partial class MainWindow : Window
         double samples = double.IsNaN(SamplesBox.Value) ? 64 : SamplesBox.Value;
         args.Add(mlt ? "--mutations" : "--spp");
         args.Add(samples.ToString(CultureInfo.InvariantCulture));
+        _lastCheckpoint = Path.Combine(_outputDir, "state.prck");
+        args.AddRange(new[] { "--checkpoint", _lastCheckpoint, "--checkpoint-interval", "30" });
+        if (AovCheck.IsChecked == true)
+            foreach (var aov in new[] { "albedo", "normal", "depth" })
+            {
+                args.Add("--aov");
+                args.Add($"{aov}={Path.Combine(_outputDir, aov + ".exr")}");
+            }
         if (!double.IsNaN(TimeBox.Value) && TimeBox.Value > 0)
         {
             args.Add("--time");
@@ -301,6 +319,25 @@ public sealed partial class MainWindow : Window
         if (rigs.Count == 0) args.Add("--no-rigs");
         foreach (var r in rigs) { args.Add("--rig"); args.Add(r); }
 
+        _lastArgs = new List<string>(args);
+        _lastSamples = samples;
+        LaunchRenderer(args);
+    }
+
+    // Resume the last render from its checkpoint with twice the sample budget.
+    private void OnContinueClick(object sender, RoutedEventArgs e)
+    {
+        if (_lastArgs is null || _lastCheckpoint is null || !File.Exists(_lastCheckpoint) || _job is { IsRunning: true }) return;
+        int i = _lastArgs.FindIndex(a => a is "--mutations" or "--spp");
+        _lastSamples *= 2;
+        if (i >= 0) _lastArgs[i + 1] = _lastSamples.ToString(CultureInfo.InvariantCulture);
+        var args = new List<string>(_lastArgs) { "--resume", _lastCheckpoint };
+        LaunchRenderer(args);
+    }
+
+    private void LaunchRenderer(List<string> args)
+    {
+        if (_rendererExe is null || _outputDir is null) return;
         _finalImage = null;
         _previewVersion++;
         LogBox.Text = $"> prender {string.Join(' ', args.Select(a => a.Contains(' ') ? $"\"{a}\"" : a))}\n";
@@ -425,6 +462,7 @@ public sealed partial class MainWindow : Window
     {
         RenderButton.IsEnabled = true;
         RenderButtonText.Text = rendering ? "Cancel" : "Render";
+        ContinueButton.IsEnabled = !rendering && _lastCheckpoint is not null && File.Exists(_lastCheckpoint);
         RenderIcon.Glyph = rendering ? "" : "";
         OpenButton.IsEnabled = !rendering;
         ReloadButton.IsEnabled = !rendering;

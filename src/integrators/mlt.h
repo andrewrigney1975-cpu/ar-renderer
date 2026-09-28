@@ -32,6 +32,34 @@ class MLTSampler : public Sampler {
         return X_[index].value;
     }
     bool LargeStep() const { return largeStep_; }
+
+    void Serialize(BinaryWriter &w) const {
+        uint64_t st, inc;
+        rng_.GetState(&st, &inc);
+        w.Put(st);
+        w.Put(inc);
+        w.Put(currentIteration_);
+        w.Put(lastLargeStepIteration_);
+        w.Put(uint8_t(largeStep_));
+        w.Put(uint64_t(X_.size()));
+        for (const PrimarySample &x : X_) {
+            w.Put(x.value);
+            w.Put(x.lastModificationIteration);
+        }
+    }
+    bool Deserialize(BinaryReader &r) {
+        uint64_t st, inc, n;
+        uint8_t ls;
+        if (!r.Get(&st) || !r.Get(&inc) || !r.Get(&currentIteration_) || !r.Get(&lastLargeStepIteration_) ||
+            !r.Get(&ls) || !r.Get(&n) || n > (uint64_t(1) << 24))
+            return false;
+        rng_.SetState(st, inc);
+        largeStep_ = ls != 0;
+        X_.resize(size_t(n));
+        for (PrimarySample &x : X_)
+            if (!r.Get(&x.value) || !r.Get(&x.lastModificationIteration)) return false;
+        return true;
+    }
     RNG &Rng() { return rng_; }
 
   private:

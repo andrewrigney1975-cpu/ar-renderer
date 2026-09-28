@@ -380,20 +380,22 @@ Phases 4–8 are the bulk of the work. The UI (phase 10) can be built in paralle
 
 ---
 
-## 14. Implementation status (v0.1)
+## 14. Implementation status (v0.2)
 
-Built and verified: renderer (`build.cmd renderer`), tests (`build.cmd test`, 13 cases / 144 assertions passing), WinUI 3 app (`build.cmd ui`), sample scene rendered end-to-end from the UI.
+Built and verified: renderer, tests (`build.cmd test`: 30 cases passing), WinUI 3 app, and the sample scene rendered end to end from the UI.
 
 | Area | Status | Notes / deviations from the plan |
 |---|---|---|
-| Ray tracing kernel | Done | **Own binned-SAH BVH** instead of Embree: zero external dependencies; plenty fast for the target scenes. Embree remains a drop-in option behind `BVH`. |
-| Dependencies | Done | Vendored single headers (stb_image/_write, nlohmann/json, doctest) instead of vcpkg + OIIO/TBB; own EXR writer and thread pool. |
-| Spectral pipeline | Done | Hero wavelengths, visible-importance wavelength sampling, analytic CIE fits, D65, Jakob–Hanika uplift (table fitted at first run and cached), spectral white adaptation. |
-| Integrators | Done | Path (reference), BDPT (MIS, media, RR), **MMLT (default)**, PSSMLT. Wavelength is part of primary sample space. |
-| Materials | Done (subset of OpenPBR) | Typed materials (diffuse, conductor, dielectric/thin, coated_diffuse, coated_conductor, subsurface, interface) + sheen/emission blocks rather than a single OpenPBR uber-material. |
-| Media / SSS | Partial | Homogeneous chromatic media, spectral-MIS distance sampling, random-walk SSS, auto-detected enclosing media. **Heterogeneous (NanoVDB) media not yet.** |
-| Lights | Done (subset) | Area (with cos^n lobe), point, spot, constant/HDR environment, power-based selection. IES, sun/sky and light BVH not yet. |
-| Cameras | Done (subset) | Thin lens, pinhole, orthographic (path tracer only). Realistic lens not yet. |
-| File formats | Partial | Native JSON (+ schema, includes, rigs), OBJ, PLY, PNG/JPEG/HDR/PFM textures, EXR/PFM/PNG/JPEG output. glTF, pbrt-v4, USD import and AOVs not yet. |
-| CLI | Done | JSON progress protocol, previews, stdin/Ctrl+C cancel with flush, time/mutation budgets. Checkpoint/resume not yet. |
-| WinUI 3 app | Done | C# / .NET 8 / Win2D; 4 views (3 schematic ortho + ray-cast camera preview with orbit/pan/dolly), render panel with live progressive preview. |
+| Ray tracing kernel | Done | **Own binned-SAH BVH** instead of Embree, to keep zero external dependencies. |
+| Dependencies | Done | Vendored headers (stb, nlohmann/json, doctest, tinyexr/miniz, cgltf, NanoVDB) instead of vcpkg, OIIO and TBB. |
+| Spectral pipeline | Done | Hero wavelengths, visible-importance wavelength sampling, analytic CIE fits, D65, Jakob–Hanika uplift, spectral white adaptation. |
+| Integrators | Done | Path tracer (reference), BDPT, **MMLT (default)** and PSSMLT. Wavelength is part of primary sample space. |
+| Materials | Done (subset of OpenPBR) | Typed materials plus sheen, emission, **normal and bump maps**. Textures: image, checker, noise. |
+| Media / SSS | Done | Homogeneous and **heterogeneous (NanoVDB, .vol, noise)** media with spectral and ratio tracking; random-walk SSS; auto-detected enclosing media. |
+| Lights | Done | Area (cos^n lobe), point, spot, **IES**, **distant**, environment (HDR/EXR), **Preetham sun and sky**, **light BVH** for NEE. |
+| Cameras | Done | Thin lens, pinhole, orthographic, and a **realistic lens** with dispersion (path tracer only). |
+| File formats | Done (except USD) | Native JSON (schema, include, import, rigs), **glTF 2.0**, **pbrt-v4** (subset), OBJ, PLY, **EXR input**, `--convert`. USD is not planned without an OpenUSD dependency. |
+| Outputs | Done | EXR/PFM/PNG/JPEG, **AOVs** (albedo, normal, depth, position). |
+| CLI | Done | JSON progress protocol, previews, cancel with flush, budgets, **checkpoint/resume (bit-exact)**. |
+| WinUI 3 app | Done | Four views, glTF/pbrt opening via `--convert` (mesh proxies), camera editing, live preview, **Continue** (resume), AOV option. |
+| Not implemented | — | USD import, OIDN denoise post-pass, manifold-exploration mutations. |

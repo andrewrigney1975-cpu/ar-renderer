@@ -41,7 +41,7 @@ public sealed class PreviewTracer
                 }
             }
         }
-        var key = doc.Lights.FirstOrDefault(l => l.Type != "environment");
+        var key = doc.Lights.FirstOrDefault(l => l.Type == "sun") ?? doc.Lights.FirstOrDefault(l => l.Type != "environment");
         if (key is not null)
         {
             _keyPos = key.Position;

@@ -6,13 +6,25 @@
 namespace pr {
 
 int RunProgressivePasses(const Scene &scene, Film &film, RenderControl &control, const IntegratorSettings &s,
-                         const char *stage, const PixelSampleFn &fn) {
+                         const char *stage, const PixelSampleFn &fn, std::string *err) {
     (void)scene;
     const int sw = film.SampleWidth(), sh = film.SampleHeight();
     const int tile = 16;
     const int tilesX = (sw + tile - 1) / tile, tilesY = (sh + tile - 1) / tile;
     const int targetSpp = s.timeLimit > 0 ? std::numeric_limits<int>::max() : std::max(1, s.spp);
     int done = 0;
+    // Resuming continues the per-pixel sample sequence where the checkpoint stopped, so a resumed
+    // render is statistically identical to an uninterrupted one.
+    if (!control.resumePath.empty()) {
+        int32_t passes = 0;
+        if (!ReadCheckpoint(control, s, film, [&](BinaryReader &r) { return r.Get(&passes); }, err)) return -1;
+        done = passes;
+        LogInfo("resumed at {} samples per pixel", done);
+    }
+    auto checkpoint = [&] {
+        std::string e;
+        if (!WriteCheckpoint(control, s, film, [&](BinaryWriter &w) { w.Put(int32_t(done)); }, &e)) LogWarning("{}", e);
+    };
     while (done < targetSpp && !control.cancel) {
         int sampleIndex = done;
         ParallelFor(int64_t(tilesX) * tilesY, [&](int64_t t, int threadIndex) {
@@ -29,8 +41,10 @@ int RunProgressivePasses(const Scene &scene, Film &film, RenderControl &control,
         pi.fraction = s.timeLimit > 0 ? std::min(1.0, elapsed / s.timeLimit) : double(done) / targetSpp;
         control.Progress(pi, done == targetSpp);
         control.MaybePreview(film, 1.0 / done);
+        if (control.CheckpointDue()) checkpoint();
         if (s.timeLimit > 0 && elapsed >= s.timeLimit) break;
     }
+    checkpoint();
     return done;
 }
 
@@ -52,13 +66,15 @@ bool PathIntegrator::Render(const Scene &scene, Film &film, RenderControl &contr
         Vec2f u = sampler.Get2D();
         Vec2f pFilm(px - m + u.x, py - m + u.y);
         CameraSample cs{pFilm, sampler.Get2D()};
-        auto ray = scene.camera->GenerateRay(cs);
-        if (ray) {
-            SampledSpectrum L = Li(scene, *ray, lambda, sampler, buf);
+        float weight = 1;
+        auto ray = scene.camera->GenerateRay(cs, lambda, &weight);
+        if (ray && weight > 0) {
+            SampledSpectrum L = Li(scene, *ray, lambda, sampler, buf) * weight;
             if (!L.HasNaNs()) film.AddSample(pFilm, L, lambda);
         }
         buf.Reset();
-    });
+    }, err);
+    if (spp < 0) return false;
     *scale = spp > 0 ? 1.0 / spp : 0.0;
     return true;
 }
@@ -68,9 +84,10 @@ SampledSpectrum PathIntegrator::SampleLd(const Scene &scene, const Interaction &
     float uLight = sampler.Get1D();
     Vec2f uL = sampler.Get2D();
     float pmf;
-    const Light *light = scene.lightSampler.Sample(uLight, &pmf);
-    if (!light || pmf == 0) return SampledSpectrum(0.f);
     LightSampleContext ctx(intr);
+    const Light *light = settings_.lightBVH ? scene.lightBVH.Sample(ctx.p, ctx.n, uLight, &pmf)
+                                            : scene.lightSampler.Sample(uLight, &pmf);
+    if (!light || pmf == 0) return SampledSpectrum(0.f);
     auto ls = light->SampleLi(ctx, uL, lambda);
     if (!ls || !ls->L || ls->pdf == 0) return SampledSpectrum(0.f);
     Vec3f wo = intr.wo, wi = ls->wi;
@@ -110,7 +127,8 @@ SampledSpectrum PathIntegrator::Li(const Scene &scene, Ray ray, SampledWavelengt
         if (depth == 0 || specularBounce) {
             L += beta * Le;
         } else {
-            float lightPdf = scene.lightSampler.PMF(light) * light->PDF_Li(prevCtx, dir);
+            float pmf = settings_.lightBVH ? scene.lightBVH.PMF(prevCtx.p, prevCtx.n, light) : scene.lightSampler.PMF(light);
+            float lightPdf = pmf * light->PDF_Li(prevCtx, dir);
             float w = PowerHeuristic(1, prevPdf, 1, lightPdf);
             L += beta * Le * w;
         }
@@ -121,7 +139,7 @@ SampledSpectrum PathIntegrator::Li(const Scene &scene, Ray ray, SampledWavelengt
         auto si = scene.Intersect(ray, Infinity, &tHit);
 
         if (medium) {
-            auto ds = medium->SampleDistance(si ? tHit : Infinity, sampler.Get1D(), lambda);
+            auto ds = medium->SampleDistance(ray, si ? tHit : Infinity, sampler.Get1D(), lambda);
             beta *= ds.weight;
             if (!beta) break;
             if (ds.scattered) {
@@ -168,14 +186,7 @@ SampledSpectrum PathIntegrator::Li(const Scene &scene, Ray ray, SampledWavelengt
             continue;
         }
 
-        MaterialEvalContext mctx;
-        mctx.p = si->p;
-        mctx.uv = si->uv;
-        mctx.wo = si->wo;
-        mctx.n = si->n;
-        mctx.ns = si->shading.n;
-        mctx.dpdus = si->shading.dpdu;
-        BSDF bsdf = prim->material ? prim->material->GetBSDF(mctx, lambda, buf) : BSDF();
+        BSDF bsdf = prim->material ? EvaluateSurface(*prim->material, *si, lambda, buf) : BSDF();
         if (!bsdf) break;
         if (depth++ >= maxDepth) break;
 

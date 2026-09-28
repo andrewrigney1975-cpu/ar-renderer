@@ -73,12 +73,13 @@ void Sphere::ComputeInteraction(const Ray &ray, float tHit, const HitInfo &, Sur
     si->n = flip_ ? -n : n;
     si->uv = {phi * Inv2Pi, theta * InvPi};
     si->wo = -Normalize(ray.d);
-    Vec3f dpdu(-rel.z, 0, rel.x);
-    if (LengthSquared(dpdu) < 1e-12f) {
-        Vec3f t2;
-        CoordinateSystem(n, &dpdu, &t2);
-    }
+    // p(u,v) with phi = 2 pi u, theta = pi v (y-up).
+    Vec3f dpdu = Vec3f(-rel.z, 0, rel.x) * (2 * Pi);
+    float cosT = n.y, sinT = SafeSqrt(1 - cosT * cosT);
+    Vec3f dpdv = sinT > 1e-6f ? Vec3f(cosT * rel.x / sinT, -r_ * sinT, cosT * rel.z / sinT) * Pi : Vec3f();
+    if (LengthSquared(dpdu) < 1e-12f || LengthSquared(dpdv) < 1e-12f) CoordinateSystem(n, &dpdu, &dpdv);
     si->dpdu = dpdu;
+    si->dpdv = dpdv;
     si->shading.n = si->n;
     si->shading.dpdu = dpdu;
 }
@@ -237,18 +238,17 @@ void Triangle::ComputeInteraction(const Ray &ray, float, const HitInfo &hit, Sur
     Vec2f duv02 = uv0 - uv2, duv12 = uv1 - uv2;
     Vec3f dp02 = p0 - p2, dp12 = p1 - p2;
     float det = duv02.x * duv12.y - duv02.y * duv12.x;
-    Vec3f dpdu;
+    Vec3f dpdu, dpdv;
     bool degenerate = std::abs(det) < 1e-9f;
     if (!degenerate) {
         float inv = 1 / det;
         dpdu = (dp02 * duv12.y - dp12 * duv02.y) * inv;
-        degenerate = LengthSquared(Cross(dpdu, n)) == 0 || !std::isfinite(dpdu.x);
+        dpdv = (dp12 * duv02.x - dp02 * duv12.x) * inv;
+        degenerate = LengthSquared(Cross(dpdu, n)) == 0 || !std::isfinite(dpdu.x) || !std::isfinite(dpdv.x);
     }
-    if (degenerate) {
-        Vec3f t2;
-        CoordinateSystem(n, &dpdu, &t2);
-    }
+    if (degenerate) CoordinateSystem(n, &dpdu, &dpdv);
     si->dpdu = dpdu;
+    si->dpdv = dpdv;
     Vec3f ns = n;
     if (!mesh_->n.empty()) {
         ns = mesh_->n[vi[0]] * b0 + mesh_->n[vi[1]] * b1 + mesh_->n[vi[2]] * b2;
@@ -261,6 +261,15 @@ void Triangle::ComputeInteraction(const Ray &ray, float, const HitInfo &hit, Sur
     si->shading.dpdu = dpdu;
     si->wo = -Normalize(ray.d);
     si->faceIndex = tri_;
+}
+
+void Triangle::NormalBounds(Vec3f *w, float *cosTheta) const {
+    const int *vi = &mesh_->indices[3 * tri_];
+    Vec3f p0 = mesh_->p[vi[0]], p1 = mesh_->p[vi[1]], p2 = mesh_->p[vi[2]];
+    Vec3f n = Normalize(CrossF(p1 - p0, p2 - p0));
+    if (!mesh_->n.empty()) n = FaceForward(n, mesh_->n[vi[0]] + mesh_->n[vi[1]] + mesh_->n[vi[2]]);
+    *w = n;
+    *cosTheta = 1;
 }
 
 std::optional<ShapeSample> Triangle::Sample(Vec2f u) const {

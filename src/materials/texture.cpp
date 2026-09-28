@@ -1,5 +1,6 @@
 #include "materials/texture.h"
 
+#include "core/noise.h"
 #include "core/rgb2spec.h"
 
 namespace pr {
@@ -46,8 +47,16 @@ static SampledSpectrum Uplift(RGB rgb, SpectrumType type, const SampledWavelengt
 }
 
 SampledSpectrum ImageSpectrumTexture::Evaluate(const TextureEvalContext &ctx, const SampledWavelengths &lambda) const {
-    RGB c = img_->Lookup(map_.Map(ctx.uv)) * scale_;
+    RGB c = img_->Lookup(map_.Map(ctx.uv));
+    c = RGB(c.r * scale_.r, c.g * scale_.g, c.b * scale_.b);
     return Uplift(c, type_, lambda);
+}
+
+float NoiseFloatTexture::Evaluate(const TextureEvalContext &ctx) const {
+    Vec3f p = world_ ? ctx.p : Vec3f(ctx.uv.x, ctx.uv.y, 0);
+    p = (p + offset_) * freq_;
+    float n = FBm(p, octaves_, 2.f, 0.5f, turbulence_);
+    return turbulence_ ? Clamp(n * 1.6f, 0.f, 1.f) : Clamp(0.5f + 0.5f * n * 1.4f, 0.f, 1.f);
 }
 
 SpectrumTexturePtr MakeRGBSpectrumTexture(RGB rgb, SpectrumType type) {

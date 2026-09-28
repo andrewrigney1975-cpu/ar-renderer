@@ -173,45 +173,6 @@ bool MLTIntegrator::Render(const Scene &scene, Film &film, RenderControl &contro
     const float sigma = settings_.sigma, largeStep = settings_.largeStepProbability;
     *scale = 0;
 
-    // ---- Bootstrap: estimate the normalization b and seed the chains (removes start-up bias).
-    const int64_t nBootstrap = std::max<int64_t>(1, settings_.bootstrapSamples);
-    std::vector<float> weights(size_t(nBootstrap * slots), 0.f);
-    std::atomic<int64_t> bootstrapDone{0};
-    ParallelFor(nBootstrap, [&](int64_t i, int ti) {
-        if (control.cancel) return;
-        PathSample ps;
-        for (int depth = 0; depth < slots; ++depth) {
-            int64_t idx = i * slots + depth;
-            MLTSampler sampler(BootstrapSequence(seed_, uint64_t(idx)), sigma, largeStep, kNumStreams);
-            eval.Eval(sampler, depth, *td[ti], &ps);
-            weights[size_t(idx)] = ps.c;
-        }
-        int64_t done = ++bootstrapDone;
-        if (ti == 0) {
-            ProgressInfo pi;
-            pi.stage = "bootstrap";
-            pi.elapsed = control.Elapsed();
-            pi.fraction = double(done) / nBootstrap;
-            control.Progress(pi);
-        }
-    }, 64);
-    if (control.cancel) return true;
-    Distribution1D bootstrap(weights);
-    const double b = double(bootstrap.Integral()) * slots;
-    {
-        ProgressInfo pi;
-        pi.stage = "bootstrap";
-        pi.elapsed = control.Elapsed();
-        pi.fraction = 1;
-        control.Progress(pi, true);
-    }
-    if (b <= 0) {
-        LogWarning("MLT bootstrap found no light-carrying paths; the image is black");
-        return true;
-    }
-    LogVerbose("MLT bootstrap: b = {}", b);
-
-    // ---- Initialize chains.
     struct Chain {
         std::unique_ptr<MLTSampler> sampler;
         PathSample current, proposed;
@@ -221,29 +182,124 @@ bool MLTIntegrator::Render(const Scene &scene, Film &film, RenderControl &contro
     };
     const int nChains = std::max(1, settings_.chains);
     std::vector<Chain> chains(nChains);
-    ParallelFor(nChains, [&](int64_t i, int ti) {
-        Chain &c = chains[size_t(i)];
-        c.rng.SetSequence(Hash(seed_, uint64_t(i), 0x5eedull));
-        int idx = bootstrap.SampleDiscrete(c.rng.UniformFloat());
-        c.depth = idx % slots;
-        c.sampler = std::make_unique<MLTSampler>(BootstrapSequence(seed_, uint64_t(idx)), sigma, largeStep, kNumStreams);
-        eval.Eval(*c.sampler, c.depth, *td[ti], &c.current);
-    });
+    double b = 0;
+    int64_t totalMutations = 0;
+
+    auto writeState = [&](BinaryWriter &w) {
+        w.Put(b);
+        w.Put(totalMutations);
+        w.Put(int32_t(nChains));
+        w.Put(int32_t(slots));
+        for (const Chain &c : chains) {
+            w.Put(int32_t(c.depth));
+            uint64_t st, inc;
+            c.rng.GetState(&st, &inc);
+            w.Put(st);
+            w.Put(inc);
+            w.Put(c.accepted);
+            w.Put(c.total);
+            w.Put(c.current.c);
+            w.Put(uint32_t(c.current.splats.size()));
+            for (const Splat &sp : c.current.splats) {
+                w.Put(sp.p);
+                w.Put(sp.xyz);
+            }
+            c.sampler->Serialize(w);
+        }
+    };
+    auto readState = [&](BinaryReader &r) {
+        int32_t nc, sl;
+        if (!r.Get(&b) || !r.Get(&totalMutations) || !r.Get(&nc) || !r.Get(&sl) || nc != nChains || sl != slots) return false;
+        for (Chain &c : chains) {
+            int32_t depth;
+            uint64_t st, inc;
+            uint32_t nSplats;
+            if (!r.Get(&depth) || !r.Get(&st) || !r.Get(&inc) || !r.Get(&c.accepted) || !r.Get(&c.total) ||
+                !r.Get(&c.current.c) || !r.Get(&nSplats) || nSplats > 100000)
+                return false;
+            c.depth = depth;
+            c.rng.SetState(st, inc);
+            c.current.splats.resize(nSplats);
+            for (Splat &sp : c.current.splats)
+                if (!r.Get(&sp.p) || !r.Get(&sp.xyz)) return false;
+            c.sampler = std::make_unique<MLTSampler>(0, sigma, largeStep, kNumStreams);
+            if (!c.sampler->Deserialize(r)) return false;
+        }
+        return true;
+    };
+    auto checkpoint = [&] {
+        std::string e;
+        if (b > 0 && !WriteCheckpoint(control, settings_, film, writeState, &e)) LogWarning("{}", e);
+    };
+
+    if (!control.resumePath.empty()) {
+        // Resume: restore the film, the normalization and every chain's exact state.
+        if (!ReadCheckpoint(control, settings_, film, readState, err)) return false;
+        LogInfo("resumed at {:.1f} mutations per pixel", double(totalMutations) / film.SamplePixelCount());
+    } else {
+        // ---- Bootstrap: estimate the normalization b and seed the chains (removes start-up bias).
+        const int64_t nBootstrap = std::max<int64_t>(1, settings_.bootstrapSamples);
+        std::vector<float> weights(size_t(nBootstrap * slots), 0.f);
+        std::atomic<int64_t> bootstrapDone{0};
+        ParallelFor(nBootstrap, [&](int64_t i, int ti) {
+            if (control.cancel) return;
+            PathSample ps;
+            for (int depth = 0; depth < slots; ++depth) {
+                int64_t idx = i * slots + depth;
+                MLTSampler sampler(BootstrapSequence(seed_, uint64_t(idx)), sigma, largeStep, kNumStreams);
+                eval.Eval(sampler, depth, *td[ti], &ps);
+                weights[size_t(idx)] = ps.c;
+            }
+            int64_t done = ++bootstrapDone;
+            if (ti == 0) {
+                ProgressInfo pi;
+                pi.stage = "bootstrap";
+                pi.elapsed = control.Elapsed();
+                pi.fraction = double(done) / nBootstrap;
+                control.Progress(pi);
+            }
+        }, 64);
+        if (control.cancel) return true;
+        Distribution1D bootstrap(weights);
+        b = double(bootstrap.Integral()) * slots;
+        {
+            ProgressInfo pi;
+            pi.stage = "bootstrap";
+            pi.elapsed = control.Elapsed();
+            pi.fraction = 1;
+            control.Progress(pi, true);
+        }
+        if (b <= 0) {
+            LogWarning("MLT bootstrap found no light-carrying paths; the image is black");
+            return true;
+        }
+        LogVerbose("MLT bootstrap: b = {}", b);
+
+        // ---- Initialize chains by resampling the bootstrap paths.
+        ParallelFor(nChains, [&](int64_t i, int ti) {
+            Chain &c = chains[size_t(i)];
+            c.rng.SetSequence(Hash(seed_, uint64_t(i), 0x5eedull));
+            int idx = bootstrap.SampleDiscrete(c.rng.UniformFloat());
+            c.depth = idx % slots;
+            c.sampler = std::make_unique<MLTSampler>(BootstrapSequence(seed_, uint64_t(idx)), sigma, largeStep, kNumStreams);
+            eval.Eval(*c.sampler, c.depth, *td[ti], &c.current);
+        });
+    }
 
     // ---- Run the chains in rounds (each round ~1 mutation per film pixel).
     const int64_t pixels = film.SamplePixelCount();
     const int64_t perChainPerRound = std::max<int64_t>(1, pixels / nChains);
     const double targetMpp = settings_.timeLimit > 0 ? std::numeric_limits<double>::infinity()
                                                      : std::max(0.01, settings_.mutationsPerPixel);
-    int64_t totalMutations = 0;
+    // Integer per-chain budget: every chain runs exactly the same number of mutations, and the
+    // total does not depend on how the render was split by checkpoints.
+    const int64_t targetPerChain = std::isfinite(targetMpp)
+                                       ? int64_t(std::ceil(targetMpp * double(pixels) / nChains - 1e-9))
+                                       : std::numeric_limits<int64_t>::max();
     while (!control.cancel) {
-        double mppSoFar = double(totalMutations) / pixels;
-        if (mppSoFar >= targetMpp) break;
-        int64_t k = perChainPerRound;
-        if (std::isfinite(targetMpp)) {
-            int64_t remaining = int64_t(std::ceil((targetMpp - mppSoFar) * pixels / nChains));
-            k = std::max<int64_t>(1, std::min(k, remaining));
-        }
+        int64_t donePerChain = totalMutations / nChains;
+        if (donePerChain >= targetPerChain) break;
+        int64_t k = std::min(perChainPerRound, targetPerChain - donePerChain);
         ParallelFor(nChains, [&](int64_t i, int ti) {
             Chain &c = chains[size_t(i)];
             for (int64_t j = 0; j < k; ++j) {
@@ -280,8 +336,10 @@ bool MLTIntegrator::Render(const Scene &scene, Film &film, RenderControl &contro
         pi.fraction = settings_.timeLimit > 0 ? std::min(1.0, elapsed / settings_.timeLimit) : std::min(1.0, mpp / targetMpp);
         control.Progress(pi, mpp >= targetMpp);
         control.MaybePreview(film, curScale);
+        if (control.CheckpointDue()) checkpoint();
         if (settings_.timeLimit > 0 && elapsed >= settings_.timeLimit) break;
     }
+    checkpoint();
     *scale = totalMutations > 0 ? b / (double(totalMutations) / pixels) : 0.0;
     return true;
 }

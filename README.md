@@ -22,19 +22,32 @@ A physically based, **spectral**, **unbiased** renderer driven by **Metropolis L
   - Layered clear-coat materials using stochastic position-free Monte Carlo
   - A Charlie sheen lobe for satin and velvet
   - Self-illumination (blackbody, RGB or spectral emission)
+  - Tangent-space normal maps and height-field bump maps
+  - Image, checker and procedural fBm noise textures
 - **Media and subsurface scattering**
-  - Homogeneous, chromatic participating media with Henyey–Greenstein phase functions.
-  - Distance sampling uses one-sample spectral MIS.
+  - Homogeneous, chromatic participating media with Henyey–Greenstein phase functions. Distance sampling uses one-sample spectral MIS.
+  - **Heterogeneous media**: NanoVDB (`.nvdb`) and Mitsuba `.vol` grids, plus procedural noise clouds. Distance sampling uses spectral tracking (Kutz et al. 2017) and transmittance uses ratio tracking; both are unbiased.
   - **Subsurface scattering** is a true volumetric random walk inside a dielectric boundary, with no diffusion approximation.
   - A pure `interface` material bounds fog volumes. Enclosing media are detected automatically.
 - **Lights**
   - Area lights on any shape, with an optional cos^n lobe for spot-like softboxes
-  - Point and spot lights
-  - A constant or HDR environment with importance sampling
-  - Lights are selected in proportion to their power.
-- **Cameras**: thin lens (f-stop or aperture), pinhole and orthographic.
-- **Outputs**: OpenEXR (float or half), PFM, and PNG/JPEG with ACES or Reinhard tone mapping. Colour spaces are linear sRGB, ACEScg and Rec.2020, with optional white balance.
-- **No third-party libraries to install**: the BVH, EXR writer and RGB-to-spectrum fitting are built in, and stb, nlohmann/json and doctest are vendored.
+  - Point and spot lights, and **IES** photometric (goniometric) lights with importance sampling
+  - Distant lights
+  - A constant, HDR or EXR environment with importance sampling
+  - **Preetham sun and sky**: a physically attenuated sun disk (Rayleigh and aerosol extinction by air mass) that can be hit and sampled with MIS
+  - Light selection: a **light BVH** (Conty & Kulla 2018) for path-tracer next-event estimation, and power-based selection for light subpaths
+- **Cameras**
+  - Thin lens (f-stop or aperture), pinhole and orthographic
+  - A **realistic lens** that ray-traces lens prescriptions (a built-in double-Gauss 50 mm, or pbrt lens files), with exit-pupil sampling, thick-lens focusing and optional per-element dispersion for real chromatic aberration
+- **Formats**
+  - Native JSON scenes, plus **glTF 2.0** (`.gltf`/`.glb`, including KHR transmission, volume, IOR, dispersion, sheen, clearcoat, emissive strength and punctual lights) and **pbrt-v4** scenes. These can be rendered directly, pulled in with `include`/`import`, or converted with `--convert`.
+  - OBJ and PLY meshes; PNG, JPEG, HDR, EXR and PFM textures.
+- **Outputs**
+  - OpenEXR (float or half), PFM, and PNG/JPEG with ACES or Reinhard tone mapping
+  - Colour spaces: linear sRGB, ACEScg and Rec.2020, with optional white balance
+  - **AOVs**: albedo, normal, depth and position
+- **Checkpoint and resume**: renders can be interrupted and continued. A resumed render is bit-identical to an uninterrupted one.
+- **No third-party libraries to install**: the BVH, EXR writer and RGB-to-spectrum fitting are built in. stb, nlohmann/json, doctest, tinyexr/miniz, cgltf and NanoVDB are vendored.
 
 ## Building
 
@@ -56,6 +69,11 @@ prender scenes\sphere-pyramid\scene.prscene.json
 prender scene.prscene.json --integrator mmlt --mutations 1024 --res 1920x1080 --out beauty.exr --out beauty.png
 prender scene.prscene.json --add-rig fog --time 5m --preview preview.png
 prender scene.prscene.json --integrator path --spp 4096 --out reference.pfm
+prender scene.prscene.json --aov albedo=albedo.exr --aov normal=normal.exr
+prender scene.prscene.json --checkpoint render.prck --time 10m          :: interrupt any time (Ctrl+C) ...
+prender scene.prscene.json --resume render.prck --mutations 4096       :: ... and continue later
+prender model.glb --out model.png                                     :: glTF / pbrt scenes render directly
+prender kitchen.pbrt --convert kitchen.prscene.json                   :: convert to native JSON
 prender --help
 ```
 
@@ -67,7 +85,8 @@ With `--progress json`, the renderer writes one JSON event per line on stdout. T
 
 - **Top, Front and Right** are schematic orthographic views. Drag to pan, use the wheel to zoom, and double-click to frame the scene. Hovering over an object shows its name.
 - **Camera** shows a quick ray-cast preview framed to the film aspect ratio. Drag to orbit, right-drag to pan and use the wheel to dolly. Edited cameras are rendered through a small override scene that includes the original file.
-- **Render panel** controls the camera, integrator, resolution, samples, time limit, seed and light rigs. **Render** launches `prender.exe`, shows the progressive preview live, and saves results under `%LOCALAPPDATA%\PRenderUI\renders\`.
+- **Render panel** controls the camera, integrator, resolution, samples, time limit, seed, light rigs and optional AOVs. **Render** launches `prender.exe`, shows the progressive preview live, and saves results under `%LOCALAPPDATA%\PRenderUI\renders\`. **Continue** resumes the last render from its checkpoint with twice the samples.
+- **Open scene** accepts `.prscene.json`, `.gltf`, `.glb` and `.pbrt`. Foreign formats are normalized through `prender --convert`, and meshes are shown as bounding-box proxies.
 
 The app finds `prender.exe` next to itself, in a `build\bin` directory above it, or through `%PRENDER_EXE%`.
 
@@ -79,15 +98,15 @@ Scenes are JSON files that may contain comments. See [`schemas/prscene.schema.js
 |---|---|---|
 | `textures` | Image and procedural data only | Tagged `srgb`, `linear` or `data`. Uplifted by usage (albedo, unbounded or illuminant) |
 | `materials` | BSDF parameters | Each parameter is a constant, a spectrum or a `{"texture": id}` reference. `emission` and `sheen` blocks are optional |
-| `media` | Participating media | Physical σa and σs, or artist-friendly albedo and mean free path |
-| `geometry` | Shapes | `sphere`, `rect`, `box`, `disk`, or `mesh` (OBJ or PLY) |
+| `media` | Participating media | `homogeneous`, `grid` (`.nvdb`/`.vol`) or `noise`; physical σa and σs, or artist-friendly albedo and mean free path |
+| `geometry` | Shapes | `sphere`, `rect`, `box`, `disk`, `mesh` (OBJ, PLY or inline arrays), or `gltf` (a primitive of a glTF file) |
 | `objects` | Instances | Geometry + material + transform, plus optional interior and exterior media |
 | `lights` | Emitters | Usually kept in **light rigs**; models never contain lights |
 | `rigs` / `active_rigs` | Swappable lighting | Select with `--rig name` or `--add-rig name` |
 | `cameras` | Any number of named cameras | Optics and pose only; film settings live in `render.film` |
 | `render` | Integrator, film and outputs | Every value can be overridden from the command line |
 
-`include` merges other files first: dictionary sections merge by id and `objects` are concatenated. The sample scene keeps materials in `materials.json` and each light rig in `rigs/*.json`.
+`include` merges other files first: dictionary sections merge by id and `objects` are concatenated. `import` does the same for glTF, pbrt or scene files and can place them with a `transform`. The sample scene keeps materials in `materials.json` and each light rig in `rigs/*.json`.
 
 ## Sample scene
 
@@ -103,7 +122,7 @@ Scenes are JSON files that may contain comments. See [`schemas/prscene.schema.js
 | Sheen | red satin fabric |
 | Self-illumination | a 2700 K emitter at the apex |
 
-The `studio` rig has a gridded key light (cos^6 lobe), a large fill softbox and a cool sky. The `fog` rig adds a haze volume for light shafts.
+The `studio` rig has a gridded key light (cos^6 lobe), a large fill softbox and a cool sky. The `fog` rig adds a haze volume for light shafts. The `daylight` rig replaces both with a Preetham sun and sky. The `lens` camera views the scene through the double-Gauss lens with dispersion.
 
 ## Tests
 
@@ -113,6 +132,13 @@ The `studio` rig has a gridded key light (cos^6 lobe), a large fill softbox and 
 - BSDF sampling and evaluation consistency, including PDF-integral and energy bounds
 - White-furnace scenes for the path tracer, BDPT and MMLT
 - A cross-integrator agreement check (path tracer, BDPT, MMLT and PSSMLT) on a glossy and refractive scene
+- Heterogeneous media: grid vs. analytic transmittance, a constant grid vs. an equivalent homogeneous medium, and a NanoVDB fog volume
+- Lights: IES parsing and sampling, plus integrator agreement for IES, distant and sun/sky lights
+- The light BVH: PMF against empirical frequencies, and many-light renders compared with power sampling and BDPT
+- Import: glTF extensions, a pbrt scene against its native twin (which checks camera handedness), and an EXR round trip
+- Checkpoint and resume: bit-exact equality with uninterrupted path tracer and MMLT renders, and rejection of mismatched checkpoints
+- The realistic lens: focusing, image orientation and dispersion
+- Normal and bump mapping
 
 ## Layout
 
@@ -120,10 +146,10 @@ The `studio` rig has a gridded key light (cos^6 lobe), a large fill softbox and 
 src/core          math, sampling, spectra, colour, RGB->spectrum, film, image I/O, threading
 src/geometry      shapes, OBJ/PLY loading, SAH BVH
 src/materials     BxDFs (GGX, dielectric, layered, sheen), textures, materials
-src/media         homogeneous media
-src/lights        area/point/spot/environment lights, power-based light sampling
-src/cameras       thin-lens and orthographic cameras
-src/scene         scene container, JSON loader (includes, rigs, auto media)
+src/media         homogeneous, voxel-grid, NanoVDB and noise media
+src/lights        area/point/spot/IES/distant/environment/sun lights, Preetham sky, light BVH
+src/cameras       thin-lens, orthographic and realistic-lens cameras
+src/scene         scene container, JSON loader (includes, imports, rigs, auto media), glTF and pbrt importers
 src/integrators   path, BDPT, MMLT/PSSMLT
 src/cli           prender.exe
 src/ui/PRenderUI  WinUI 3 front end (C#, Win2D)
@@ -135,7 +161,10 @@ schemas/          JSON Schema for .prscene.json
 ## Known limitations
 
 - MMLT and PSSMLT need a finite `max_depth`, and paths longer than that are not sampled. Use 64 or more for scenes with heavy subsurface scattering. The path tracer and BDPT use Russian roulette.
-- Only homogeneous media are supported. Heterogeneous (NanoVDB) media, normal and bump mapping, glTF/USD import, and resume/checkpointing are not implemented yet (see `PLAN.md`).
+- The realistic lens camera works with the path tracer only, because it has no closed-form importance for light tracing.
+- USD import, OIDN denoising and manifold-exploration mutations are not implemented (see `PLAN.md`).
+- Compressed (ZIP/Blosc) NanoVDB files must be re-saved uncompressed.
+- The pbrt importer covers the common subset. Unsupported features (curves, cylinders, displacement, motion blur, measured BSDFs) are skipped with a warning.
 - SDS paths lit by *point* lights through *pinhole* cameras have zero probability under any unbiased sampler. Use area lights and thin-lens cameras for caustics seen through glass.
 
 ## License
@@ -149,3 +178,6 @@ Vendored third-party code in `third_party/` keeps its own license:
 | [stb_image / stb_image_write](https://github.com/nothings/stb) | MIT or public domain (choose either) |
 | [nlohmann/json](https://github.com/nlohmann/json) | MIT |
 | [doctest](https://github.com/doctest/doctest) | MIT |
+| [tinyexr](https://github.com/syoyo/tinyexr) / miniz | BSD-3-Clause / MIT |
+| [cgltf](https://github.com/jkuhlmann/cgltf) | MIT |
+| [NanoVDB](https://github.com/AcademySoftwareFoundation/openvdb) (headers) | Apache-2.0 |

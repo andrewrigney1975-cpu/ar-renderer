@@ -62,7 +62,7 @@ struct SurfaceInteraction : Interaction {
         Vec3f n;     // shading normal (same hemisphere as n)
         Vec3f dpdu;  // shading tangent
     } shading;
-    Vec3f dpdu;
+    Vec3f dpdu, dpdv;
     const Primitive *primitive = nullptr;
     int faceIndex = 0;
 

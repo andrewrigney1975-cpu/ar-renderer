@@ -6,6 +6,7 @@
 #include "core/log.h"
 #include "core/parallel.h"
 #include "core/rgb2spec.h"
+#include "integrators/aov.h"
 #include "integrators/integrator.h"
 #include "scene/scene_loader.h"
 
@@ -20,8 +21,12 @@
 #include <vector>
 
 #ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include <windows.h>
 #undef RGB
 #endif
@@ -32,7 +37,7 @@ namespace fs = std::filesystem;
 
 namespace {
 
-constexpr const char *kVersion = "0.1.0";
+constexpr const char *kVersion = "0.2.0";
 
 enum ExitCode { ExitOK = 0, ExitSceneError = 1, ExitIOError = 2, ExitCancelled = 3 };
 
@@ -47,11 +52,16 @@ struct Args {
     std::optional<int64_t> bootstrap;
     std::optional<uint64_t> seed;
     std::vector<std::string> outputs;
+    std::vector<std::pair<std::string, std::string>> aovs;  // name, file
+    int aovSpp = 16;
     std::string preview;
     double previewInterval = 2.0;
     ProgressMode progress = ProgressMode::Text;
     bool controlStdin = false;
     bool validate = false;
+    std::string convert;
+    std::string checkpoint, resume;
+    double checkpointInterval = 60;
     bool verbose = false;
     bool quiet = false;
 };
@@ -75,10 +85,16 @@ void PrintUsage() {
         "  --seed <n>                 random seed\n"
         "  --res <w>x<h>              override film resolution\n"
         "  --out <file>               output (repeatable): .exr .pfm .png .jpg\n"
+        "  --aov <name>=<file>        auxiliary output: albedo, normal, depth, position (repeatable)\n"
+        "  --aov-spp <n>              samples per pixel for AOVs (default 16)\n"
         "  --preview <file.png>       write a progressive preview periodically\n"
         "  --preview-interval <sec>   preview period (default 2)\n"
         "  --progress json|text|none  progress reporting on stdout (default text)\n"
         "  --control stdin            accept 'cancel' commands on stdin\n"
+        "  --checkpoint <file>        save resumable state periodically, on cancel and at the end\n"
+        "  --checkpoint-interval <d>  checkpoint period (default 60s)\n"
+        "  --resume <file>            continue a checkpointed render (raise --spp/--mutations or --time)\n"
+        "  --convert <out.json>       write the scene (incl. glTF/pbrt imports) as native JSON and exit\n"
         "  --validate                 load and validate the scene, then exit\n"
         "  --verbose | --quiet\n"
         "  --version | --help\n\n"
@@ -156,6 +172,19 @@ bool ParseArgs(int argc, char **argv, Args *a, std::string *err) {
         } else if (s == "--out" || s == "-o") {
             if (!(v = need(i))) return false;
             a->outputs.push_back(v);
+        } else if (s == "--aov") {
+            if (!(v = need(i))) return false;
+            std::string spec = v;
+            size_t eq = spec.find('=');
+            AOVType t;
+            if (eq == std::string::npos || !ParseAOV(spec.substr(0, eq), &t)) {
+                *err = "bad --aov (expected albedo|normal|depth|position=<file>): " + spec;
+                return false;
+            }
+            a->aovs.push_back({spec.substr(0, eq), spec.substr(eq + 1)});
+        } else if (s == "--aov-spp") {
+            if (!(v = need(i))) return false;
+            a->aovSpp = std::max(1, std::atoi(v));
         } else if (s == "--preview") {
             if (!(v = need(i))) return false;
             a->preview = v;
@@ -179,6 +208,21 @@ bool ParseArgs(int argc, char **argv, Args *a, std::string *err) {
                 return false;
             }
             a->controlStdin = true;
+        } else if (s == "--checkpoint") {
+            if (!(v = need(i))) return false;
+            a->checkpoint = v;
+        } else if (s == "--checkpoint-interval") {
+            if (!(v = need(i))) return false;
+            if (!ParseDuration(v, &a->checkpointInterval)) {
+                *err = std::string("bad duration: ") + v;
+                return false;
+            }
+        } else if (s == "--resume") {
+            if (!(v = need(i))) return false;
+            a->resume = v;
+        } else if (s == "--convert") {
+            if (!(v = need(i))) return false;
+            a->convert = v;
         } else if (s == "--validate") {
             a->validate = true;
         } else if (s == "--verbose" || s == "-v") {
@@ -243,6 +287,37 @@ std::string Lower(std::string s) {
     return s;
 }
 
+bool WriteAOV(const Scene &scene, const OutputSpec &spec, int spp, std::string *err) {
+    AOVType type;
+    if (!ParseAOV(spec.aov, &type)) {
+        *err = "unknown AOV '" + spec.aov + "'";
+        return false;
+    }
+    Image img = RenderAOV(scene, type, spp, scene.settings.seed);
+    std::string ext = Lower(Utf8Path(spec.file).extension().string());
+    if (ext == ".exr") return WriteEXR(spec.file, img, spec.half, err);
+    if (ext == ".pfm") return WritePFM(spec.file, img, err);
+    // LDR visualization.
+    float maxDepth = 0;
+    if (type == AOVType::Depth)
+        for (float v : img.Data())
+            if (v < 1e9f) maxDepth = std::max(maxDepth, v);
+    Image disp(img.Width(), img.Height());
+    for (int y = 0; y < img.Height(); ++y)
+        for (int x = 0; x < img.Width(); ++x) {
+            RGB c = img.Get(x, y);
+            if (type == AOVType::Normal) c = RGB(0.5f + 0.5f * c.r, 0.5f + 0.5f * c.g, 0.5f + 0.5f * c.b);
+            else if (type == AOVType::Depth) {
+                float d = c.r < 1e9f && maxDepth > 0 ? 1 - c.r / maxDepth : 0.f;
+                c = RGB(d, d, d);
+            } else if (type == AOVType::Albedo) {
+                c = RGB(SRGBEncode(c.r), SRGBEncode(c.g), SRGBEncode(c.b));
+            }
+            disp.Set(x, y, c);
+        }
+    return WriteLDR(spec.file, disp, err);
+}
+
 bool WriteOutput(const Film &film, double scale, const OutputSpec &spec, std::string *err) {
     std::error_code ec;
     fs::path p = Utf8Path(spec.file);
@@ -285,6 +360,15 @@ int main(int argc, char **argv) {
         }).detach();
     }
 
+    if (!args.convert.empty()) {
+        if (!ConvertSceneToJson(args.scene, args.convert, &err)) {
+            EmitError(err);
+            return ExitSceneError;
+        }
+        LogInfo("wrote {}", args.convert);
+        Emit({{"event", "done"}, {"outputs", json::array({args.convert})}});
+        return ExitOK;
+    }
     Emit({{"event", "stage"}, {"name", "load"}});
     // Make sure the spectral uplift table exists before timing the render.
     RGBToSpectrumTable::Get();
@@ -355,6 +439,11 @@ int main(int argc, char **argv) {
     auto integrator = CreateIntegrator(rs.integrator, rs.seed);
 
     control.previewInterval = args.preview.empty() ? 0 : std::max(0.25, args.previewInterval);
+    control.resumePath = args.resume;
+    control.checkpointPath = !args.checkpoint.empty() ? args.checkpoint : args.resume;
+    control.checkpointInterval = std::max(1.0, args.checkpointInterval);
+    control.fingerprint = scene->Fingerprint();
+    control.seed = rs.seed;
     std::string lastStage;
     control.onProgress = [&](const ProgressInfo &p) {
         if (p.stage != lastStage) {
@@ -400,9 +489,16 @@ int main(int argc, char **argv) {
     Emit({{"event", "stage"}, {"name", "write"}});
     json written = json::array();
     int rc = control.cancel ? ExitCancelled : ExitOK;
+    for (const auto &[name, file] : args.aovs) {
+        OutputSpec spec;
+        spec.file = file;
+        spec.aov = name;
+        rs.outputs.push_back(spec);
+    }
     for (const auto &o : rs.outputs) {
         std::string e;
-        if (!WriteOutput(film, scale, o, &e)) {
+        bool written_ok = o.aov.empty() ? WriteOutput(film, scale, o, &e) : WriteAOV(*scene, o, args.aovSpp, &e);
+        if (!written_ok) {
             EmitError(e);
             rc = ExitIOError;
         } else {

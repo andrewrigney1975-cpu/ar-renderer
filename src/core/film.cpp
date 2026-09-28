@@ -54,6 +54,23 @@ void Film::Clear() {
     for (size_t i = 0; i < n; ++i) xyz_[i].store(0.0, std::memory_order_relaxed);
 }
 
+void Film::Serialize(BinaryWriter &w) const {
+    uint64_t n = uint64_t(settings_.width) * settings_.height * 3;
+    w.Put(n);
+    for (uint64_t i = 0; i < n; ++i) w.Put(xyz_[i].load(std::memory_order_relaxed));
+}
+
+bool Film::Deserialize(BinaryReader &r) {
+    uint64_t n;
+    if (!r.Get(&n) || n != uint64_t(settings_.width) * settings_.height * 3) return false;
+    for (uint64_t i = 0; i < n; ++i) {
+        double v;
+        if (!r.Get(&v)) return false;
+        xyz_[i].store(v, std::memory_order_relaxed);
+    }
+    return true;
+}
+
 void Film::AddSample(Vec2f p, const SampledSpectrum &L, const SampledWavelengths &lambda, float weight) {
     if (L.IsZero()) return;
     AddXYZ(p, ToXYZ(L, lambda) * weight);

@@ -27,6 +27,6 @@ class PathIntegrator : public Integrator {
 // renders one pixel sample. Returns completed samples per pixel.
 using PixelSampleFn = std::function<void(int px, int py, int sampleIndex, int threadIndex)>;
 int RunProgressivePasses(const Scene &scene, Film &film, RenderControl &control, const IntegratorSettings &s,
-                         const char *stage, const PixelSampleFn &fn);
+                         const char *stage, const PixelSampleFn &fn, std::string *err);
 
 } // namespace pr

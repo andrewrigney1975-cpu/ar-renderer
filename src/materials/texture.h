@@ -89,16 +89,19 @@ class ImageData {
 
 class ImageSpectrumTexture : public SpectrumTexture {
   public:
-    ImageSpectrumTexture(std::shared_ptr<const ImageData> img, UVMapping map, SpectrumType type, float scale)
+    ImageSpectrumTexture(std::shared_ptr<const ImageData> img, UVMapping map, SpectrumType type, RGB scale)
         : img_(std::move(img)), map_(map), type_(type), scale_(scale) {}
     SampledSpectrum Evaluate(const TextureEvalContext &ctx, const SampledWavelengths &lambda) const override;
-    RGB AverageRGB() const override { return img_->Average() * scale_; }
+    RGB AverageRGB() const override {
+        RGB a = img_->Average();
+        return {a.r * scale_.r, a.g * scale_.g, a.b * scale_.b};
+    }
 
   private:
     std::shared_ptr<const ImageData> img_;
     UVMapping map_;
     SpectrumType type_;
-    float scale_;
+    RGB scale_;
 };
 
 class ImageFloatTexture : public FloatTexture {
@@ -147,6 +150,48 @@ class CheckerFloatTexture : public FloatTexture {
   private:
     FloatTexturePtr a_, b_;
     UVMapping map_;
+};
+
+// Procedural fBm noise in [0,1], evaluated in world space or in uv space (z = 0).
+class NoiseFloatTexture : public FloatTexture {
+  public:
+    NoiseFloatTexture(float frequency, int octaves, bool turbulence, bool worldSpace, Vec3f offset)
+        : freq_(frequency), octaves_(octaves), turbulence_(turbulence), world_(worldSpace), offset_(offset) {}
+    float Evaluate(const TextureEvalContext &ctx) const override;
+
+  private:
+    float freq_;
+    int octaves_;
+    bool turbulence_, world_;
+    Vec3f offset_;
+};
+
+// Blend of two spectrum textures driven by a float texture.
+class MixSpectrumTexture : public SpectrumTexture {
+  public:
+    MixSpectrumTexture(SpectrumTexturePtr a, SpectrumTexturePtr b, FloatTexturePtr t)
+        : a_(std::move(a)), b_(std::move(b)), t_(std::move(t)) {}
+    SampledSpectrum Evaluate(const TextureEvalContext &ctx, const SampledWavelengths &lambda) const override {
+        float t = Clamp(t_->Evaluate(ctx), 0.f, 1.f);
+        return a_->Evaluate(ctx, lambda) * (1 - t) + b_->Evaluate(ctx, lambda) * t;
+    }
+    RGB AverageRGB() const override { return (a_->AverageRGB() + b_->AverageRGB()) * 0.5f; }
+
+  private:
+    SpectrumTexturePtr a_, b_;
+    FloatTexturePtr t_;
+};
+
+class MixFloatTexture : public FloatTexture {
+  public:
+    MixFloatTexture(FloatTexturePtr a, FloatTexturePtr b, FloatTexturePtr t) : a_(std::move(a)), b_(std::move(b)), t_(std::move(t)) {}
+    float Evaluate(const TextureEvalContext &ctx) const override {
+        float t = Clamp(t_->Evaluate(ctx), 0.f, 1.f);
+        return a_->Evaluate(ctx) * (1 - t) + b_->Evaluate(ctx) * t;
+    }
+
+  private:
+    FloatTexturePtr a_, b_, t_;
 };
 
 // Spectrum texture from a constant RGB triple, uplifted according to its usage.

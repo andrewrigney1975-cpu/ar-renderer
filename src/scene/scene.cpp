@@ -1,5 +1,7 @@
 #include "scene/scene.h"
 
+#include "core/rng.h"
+
 #include <map>
 
 namespace pr {
@@ -21,6 +23,7 @@ void Scene::Build() {
         if (l->Type() == LightType::Infinite) infiniteLights.push_back(l.get());
     }
     lightSampler = LightSampler(all);
+    lightBVH = BVHLightSampler(all);
 }
 
 std::optional<SurfaceInteraction> Scene::Intersect(const Ray &ray, float tMax, float *tHit) const {
@@ -43,13 +46,27 @@ SampledSpectrum Scene::Tr(const Interaction &p0, const Interaction &p1, const Sa
         float tHit = 1 - ShadowEpsilon;
         auto si = Intersect(ray, 1 - ShadowEpsilon, &tHit);
         if (si && !si->primitive->IsInterface()) return SampledSpectrum(0.f);
-        if (medium) Tr *= medium->Transmittance((si ? tHit : 1.f) * Length(ray.d), lambda);
+        if (medium) {
+            float len = Length(ray.d);
+            Tr *= medium->Transmittance(Ray(ray.o, ray.d / len), (si ? tHit : 1.f) * len, lambda);
+        }
         if (!Tr) return Tr;
         if (!si) return Tr;
         medium = si->GetMedium(ray.d);
         ray = si->SpawnRayTo(p1);
     }
     return SampledSpectrum(0.f);
+}
+
+uint64_t Scene::Fingerprint() const {
+    uint64_t h = Hash(uint64_t(primitives.size()), uint64_t(lights.size()));
+    for (const Primitive &p : primitives) {
+        Bounds3f b = p.shape->Bounds();
+        h = Hash(h, b.pMin, b.pMax, p.material != nullptr, p.areaLight != nullptr);
+    }
+    for (const auto &l : lights) h = Hash(h, l->PowerY());
+    if (camera) h = Hash(h, camera->Position());
+    return h;
 }
 
 const Medium *Scene::MediumAt(const Vec3f &p) const {

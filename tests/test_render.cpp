@@ -1,6 +1,7 @@
 #include "doctest/doctest.h"
 
 #include "core/film.h"
+#include "core/image.h"
 #include "core/parallel.h"
 #include "integrators/integrator.h"
 #include "scene/scene_loader.h"
@@ -107,4 +108,34 @@ TEST_CASE("integrators agree on a glossy/refractive scene") {
     CHECK(bdpt == doctest::Approx(pt).epsilon(0.03));
     CHECK(mmlt == doctest::Approx(pt).epsilon(0.05));
     CHECK(pss == doctest::Approx(pt).epsilon(0.05));
+}
+
+TEST_CASE("normal and bump mapping") {
+    fs::path dir = fs::temp_directory_path() / "prender_tests";
+    fs::create_directories(dir);
+    // Flat tangent-space normal map (0.5, 0.5, 1): must leave shading unchanged.
+    Image flat(4, 4);
+    for (int y = 0; y < 4; ++y)
+        for (int x = 0; x < 4; ++x) flat.Set(x, y, RGB(0.5f, 0.5f, 1.f));
+    std::string err;
+    REQUIRE(WritePFM((dir / "flatnormal.pfm").string(), flat, &err));
+    auto scene = [&](const std::string &extra) {
+        return std::string(R"({
+  "textures": { "nm": { "type": "image", "file": ")") + (dir / "flatnormal.pfm").generic_string() + R"(", "colorspace": "linear" },
+                "bumps": { "type": "noise", "frequency": 6, "octaves": 3 } },
+  "materials": { "m": { "type": "conductor", "metal": "Cu", "roughness": 0.2 )" + extra + R"( } },
+  "geometry": { "ball": { "type": "sphere", "radius": 1 } },
+  "objects": [ { "geometry": "ball", "material": "m" } ],
+  "lights": { "sky": { "type": "environment", "color": [1, 1, 1] },
+              "key": { "type": "distant", "direction": [-0.5, -1, -0.3], "irradiance": 3 } },
+  "cameras": { "cam": { "type": "pinhole", "position": [0, 0, 4], "look_at": [0, 0, 0], "fov_y": 40 } },
+  "render": { "camera": "cam", "film": { "width": 24, "height": 24, "filter": "box" } }
+})";
+    };
+    double plain = RenderMeanY(scene(""), IntegratorType::Path, 32, 0, "nm_plain");
+    double flatNm = RenderMeanY(scene(R"(, "normal_map": { "texture": "nm" })"), IntegratorType::Path, 32, 0, "nm_flat");
+    double bumped = RenderMeanY(scene(R"(, "bump_map": { "texture": "bumps", "scale": 0.05 })"), IntegratorType::Path, 32, 0, "nm_bump");
+    MESSAGE("plain=" << plain << " flat normal map=" << flatNm << " bumped=" << bumped);
+    CHECK(flatNm == doctest::Approx(plain).epsilon(1e-3));
+    CHECK(std::abs(bumped - plain) > 1e-3 * plain);
 }

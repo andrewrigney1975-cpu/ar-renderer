@@ -4,6 +4,7 @@
 #include "core/film.h"
 #include "geometry/bvh.h"
 #include "lights/light.h"
+#include "lights/light_bvh.h"
 #include "materials/material.h"
 #include "media/medium.h"
 
@@ -36,12 +37,14 @@ struct IntegratorSettings {
     float sigma = 0.01f;
     double timeLimit = 0;           // seconds; 0 = none
     bool russianRoulette = true;    // path / bdpt only
+    bool lightBVH = true;           // path: importance-based light selection (else by power)
 };
 
 struct OutputSpec {
     std::string file;
     ToneMap toneMap = ToneMap::ACES;
     bool half = false;
+    std::string aov;  // empty: beauty; else albedo | normal | depth | position
 };
 
 struct RenderSettings {
@@ -66,7 +69,8 @@ class Scene {
     std::vector<const Light *> infiniteLights;
     std::unique_ptr<Camera> camera;
     RenderSettings settings;
-    LightSampler lightSampler;
+    LightSampler lightSampler;      // power-based (BDPT/MLT light subpaths need a context-free pmf)
+    BVHLightSampler lightBVH;       // spatially adaptive (path tracer next-event estimation)
     Vec3f worldCenter;
     float worldRadius = 1;  // bounding sphere of geometry + camera (used by infinite lights)
 
@@ -82,6 +86,8 @@ class Scene {
     SampledSpectrum Tr(const Interaction &p0, const Interaction &p1, const SampledWavelengths &lambda) const;
     // Innermost medium enclosing a point (via containment tests of medium-bearing closed shapes).
     const Medium *MediumAt(const Vec3f &p) const;
+    // Hash of geometry, lights and camera, used to validate checkpoints.
+    uint64_t Fingerprint() const;
 
   private:
     BVH bvh_;

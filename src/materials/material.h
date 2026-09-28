@@ -3,6 +3,7 @@
 #include "core/memory.h"
 #include "materials/bsdf.h"
 #include "materials/texture.h"
+#include "scene/interaction.h"
 
 #include <string>
 
@@ -10,6 +11,33 @@ namespace pr {
 
 struct MaterialEvalContext : TextureEvalContext {
     Vec3f wo, n, ns, dpdus;
+    Vec3f dpdu, dpdv;  // surface parameterization (for normal/bump mapping)
+    static MaterialEvalContext From(const SurfaceInteraction &si) {
+        MaterialEvalContext c;
+        c.p = si.p;
+        c.uv = si.uv;
+        c.wo = si.wo;
+        c.n = si.n;
+        c.ns = si.shading.n;
+        c.dpdus = si.shading.dpdu;
+        c.dpdu = si.dpdu;
+        c.dpdv = si.dpdv;
+        return c;
+    }
+};
+
+// Tangent-space normal map (OpenGL/glTF convention: +Y up, rgb = n * 0.5 + 0.5).
+struct NormalMapParams {
+    std::shared_ptr<const ImageData> image;
+    UVMapping mapping;
+    float strength = 1;
+    bool flipGreen = false;  // DirectX / glTF image-space convention
+};
+
+// Height field; the shading normal is perturbed by its gradient (scale in scene units).
+struct BumpMapParams {
+    FloatTexturePtr height;
+    float scale = 1;
 };
 
 struct SheenParams {
@@ -23,7 +51,11 @@ class Material {
     virtual ~Material() = default;
     // May terminate secondary wavelengths (dispersion).
     BSDF GetBSDF(const MaterialEvalContext &ctx, SampledWavelengths &lambda, ScratchBuffer &buf) const;
+    // Applies normal/bump mapping to the shading frame in ctx. Returns true if it changed.
+    bool PerturbShading(MaterialEvalContext &ctx) const;
     void SetSheen(SheenParams s) { sheen_ = std::move(s); }
+    void SetNormalMap(NormalMapParams n) { normalMap_ = std::move(n); }
+    void SetBumpMap(BumpMapParams b) { bumpMap_ = std::move(b); }
     std::string name;
 
   protected:
@@ -32,7 +64,13 @@ class Material {
 
   private:
     SheenParams sheen_;
+    NormalMapParams normalMap_;
+    BumpMapParams bumpMap_;
 };
+
+// Evaluates the material at a surface hit: applies normal/bump mapping (updating si's shading
+// frame so integrators use the perturbed normal) and returns the BSDF.
+BSDF EvaluateSurface(const Material &m, SurfaceInteraction &si, SampledWavelengths &lambda, ScratchBuffer &buf);
 
 class DiffuseMaterial : public Material {
   public:

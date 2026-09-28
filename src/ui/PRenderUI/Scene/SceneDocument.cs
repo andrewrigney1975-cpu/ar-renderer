@@ -17,6 +17,7 @@ public sealed class SceneObject
     public required PreviewMaterial Material { get; init; }
     public bool IsLight { get; init; }
     public bool IsInterface { get; init; }                            // invisible medium boundary
+    public bool IsProxy { get; init; }                                // mesh drawn as its bounding box
 
     public Vector3 Center => Vector3.Transform(Vector3.Zero, Transform);
     public float WorldRadius
@@ -147,12 +148,50 @@ public sealed class SceneDocument
     public Vector3 SkyColor { get; private set; } = new(0.1f, 0.12f, 0.16f);
     public List<string> Warnings { get; } = new();
 
-    public static SceneDocument Load(string path, IReadOnlyCollection<string>? activeRigs = null)
+    /// <summary>
+    /// Loads a scene. When the renderer is available the scene is first normalized with
+    /// <c>prender --convert</c>, which resolves glTF/pbrt imports and annotates mesh bounds;
+    /// otherwise native JSON is parsed directly.
+    /// </summary>
+    public static SceneDocument Load(string path, IReadOnlyCollection<string>? activeRigs = null, string? rendererExe = null)
     {
         var doc = new SceneDocument { Path = System.IO.Path.GetFullPath(path) };
-        JsonObject root = LoadComposed(doc.Path, 0);
+        string source = doc.Path;
+        string ext = System.IO.Path.GetExtension(source).ToLowerInvariant();
+        bool foreign = ext is ".gltf" or ".glb" or ".pbrt";
+        if (rendererExe is not null)
+        {
+            string? converted = Convert(rendererExe, source, out string? error);
+            if (converted is not null) source = converted;
+            else if (foreign) throw new InvalidDataException(error ?? "conversion failed");
+            else doc.Warnings.Add("prender --convert failed; showing the raw scene: " + error);
+        }
+        else if (foreign)
+        {
+            throw new InvalidDataException("Opening glTF/pbrt scenes needs prender.exe");
+        }
+        JsonObject root = LoadComposed(source, 0);
         doc.Build(root, activeRigs);
         return doc;
+    }
+
+    private static string? Convert(string exe, string scene, out string? error)
+    {
+        error = null;
+        string dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "PRenderUI");
+        Directory.CreateDirectory(dir);
+        string outPath = System.IO.Path.Combine(dir, $"scene-{Math.Abs(scene.GetHashCode()):x}.json");
+        var psi = new System.Diagnostics.ProcessStartInfo(exe)
+        {
+            UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true, RedirectStandardOutput = true,
+        };
+        foreach (var a in new[] { scene, "--convert", outPath, "--progress", "none", "--quiet" }) psi.ArgumentList.Add(a);
+        using var p = System.Diagnostics.Process.Start(psi);
+        if (p is null) return null;
+        string stderr = p.StandardError.ReadToEnd();
+        if (!p.WaitForExit(120_000)) { p.Kill(); error = "timed out"; return null; }
+        if (p.ExitCode != 0 || !File.Exists(outPath)) { error = stderr.Trim(); return null; }
+        return outPath;
     }
 
     private static JsonObject ReadJson(string path)
@@ -314,6 +353,21 @@ public sealed class SceneDocument
             if (ln is not JsonObject l) continue;
             if (l["enabled"] is JsonValue en && !en.GetValue<bool>()) continue;
             string type = l["type"]?.GetValue<string>() ?? "";
+            if (type is "sun_sky" or "sun" or "distant" or "directional")
+            {
+                Vector3 toLight;
+                if (type is "distant" or "directional")
+                    toLight = -(l["direction"] is JsonNode dd ? Vector3.Normalize(Vec(dd)) : -Vector3.UnitY);
+                else if (l["sun_direction"] is JsonNode sd) toLight = Vector3.Normalize(Vec(sd));
+                else
+                {
+                    double el = Num(l["elevation"], 45) * Math.PI / 180, az = Num(l["azimuth"], 0) * Math.PI / 180;
+                    toLight = new((float)(Math.Cos(el) * Math.Sin(az)), (float)Math.Sin(el), (float)(Math.Cos(el) * Math.Cos(az)));
+                }
+                if (type == "sun_sky") SkyColor = new(0.32f, 0.46f, 0.75f);
+                Lights.Add(new LightInfo { Name = id, Type = "sun", Position = toLight * 1000, Direction = -toLight });
+                continue;
+            }
             if (type is "environment" or "env" or "sky")
             {
                 if (l["color"] is JsonArray c) SkyColor = Vec(c) * (float)Num(l["intensity"], 1);
@@ -346,13 +400,21 @@ public sealed class SceneDocument
             {
                 Name = name,
                 Type = c["type"]?.GetValue<string>() ?? "perspective",
-                Position = c["position"] is JsonNode p ? Vec(p) : new Vector3(0, 0, 5),
+                Position = c["position"] is JsonNode p ? Vec(p) : MatrixPoint(c["matrix"], Vector3.Zero) ?? new Vector3(0, 0, 5),
                 Up = c["up"] is JsonNode u ? Vec(u) : Vector3.UnitY,
                 OrthoHeight = (float)Num(c["ortho_height"], 2),
                 Source = (JsonObject)c.DeepClone(),
             };
-            cam.LookAt = c["look_at"] is JsonNode t ? Vec(t) : cam.Position + (c["direction"] is JsonNode d ? Vec(d) : -Vector3.UnitZ);
+            cam.LookAt = c["look_at"] is JsonNode t ? Vec(t)
+                       : MatrixPoint(c["matrix"], Vector3.UnitZ) ?? cam.Position + (c["direction"] is JsonNode d ? Vec(d) : -Vector3.UnitZ);
             if (c["fov_y"] is JsonNode f) cam.FovY = (float)Num(f, 40);
+            else if (cam.Type == "realistic")
+            {
+                // Double-Gauss 50 mm on the given film diagonal (preview approximation).
+                double diag = Num(c["film_diagonal_mm"], 43.27), aspect = (double)FilmWidth / FilmHeight;
+                double filmH = diag / Math.Sqrt(1 + aspect * aspect);
+                cam.FovY = (float)(2 * Math.Atan(filmH / (2 * 50.0)) * 180 / Math.PI);
+            }
             else if (c["focal_length_mm"] is JsonNode fl)
                 cam.FovY = (float)(2 * Math.Atan(Num(c["sensor_height_mm"], 24) / (2 * Num(fl, 50))) * 180 / Math.PI);
             Cameras[name] = cam;
@@ -361,6 +423,15 @@ public sealed class SceneDocument
     }
 
     // ---- helpers -------------------------------------------------------------------------
+
+    // Applies a row-major camera-to-world matrix (renderer convention) to a camera-space point.
+    private static Vector3? MatrixPoint(JsonNode? m, Vector3 p)
+    {
+        if (m is not JsonArray a || a.Count != 16) return null;
+        float F(int i) => (float)Num(a[i], 0);
+        return new Vector3(F(0) * p.X + F(1) * p.Y + F(2) * p.Z + F(3), F(4) * p.X + F(5) * p.Y + F(6) * p.Z + F(7),
+                           F(8) * p.X + F(9) * p.Y + F(10) * p.Z + F(11));
+    }
 
     private static double Num(JsonNode? n, double def) =>
         n is JsonValue v && v.TryGetValue(out double d) ? d : def;
@@ -435,10 +506,20 @@ public sealed class SceneDocument
         if (kind == ShapeKind.Box && g["size"] is JsonNode bs) size = Vec(bs);
         float radius = (float)Num(g["radius"], 1);
         if (kind == ShapeKind.Sphere && g["center"] is JsonNode cn) xf = Matrix4x4.CreateTranslation(Vec(cn)) * xf;
+        bool proxy = false;
+        if (kind == ShapeKind.Mesh && g["bounds"] is JsonArray b && b.Count == 2)
+        {
+            // Meshes are shown as their (transformed) bounding boxes.
+            Vector3 mn = Vec(b[0]!), mx = Vec(b[1]!);
+            size = Vector3.Max(mx - mn, new Vector3(1e-3f));
+            xf = Matrix4x4.CreateTranslation((mn + mx) / 2) * xf;
+            kind = ShapeKind.Box;
+            proxy = true;
+        }
         return new SceneObject
         {
             Name = name, Kind = kind, Transform = xf, Radius = radius, Size = size, Material = mat,
-            IsLight = isLight, IsInterface = isInterface,
+            IsLight = isLight, IsInterface = isInterface, IsProxy = proxy,
         };
     }
 

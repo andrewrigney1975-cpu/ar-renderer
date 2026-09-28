@@ -133,13 +133,28 @@
                             <StackPanel x:Name="RigPanel" Orientation="Horizontal" Spacing="12" />
                         </StackPanel>
 
-                        <Button x:Name="RenderButton" Click="OnRenderClick" Style="{StaticResource AccentButtonStyle}"
-                                HorizontalAlignment="Stretch" Height="40">
-                            <StackPanel Orientation="Horizontal" Spacing="8">
-                                <FontIcon x:Name="RenderIcon" Glyph="&#xE768;" FontSize="14" />
-                                <TextBlock x:Name="RenderButtonText" Text="Render" />
-                            </StackPanel>
-                        </Button>
+                        <CheckBox x:Name="AovCheck" Content="Also write AOVs (albedo, normal, depth)" />
+
+                        <Grid ColumnSpacing="8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <Button x:Name="RenderButton" Click="OnRenderClick" Style="{StaticResource AccentButtonStyle}"
+                                    HorizontalAlignment="Stretch" Height="40">
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <FontIcon x:Name="RenderIcon" Glyph="&#xE768;" FontSize="14" />
+                                    <TextBlock x:Name="RenderButtonText" Text="Render" />
+                                </StackPanel>
+                            </Button>
+                            <Button x:Name="ContinueButton" Grid.Column="1" Click="OnContinueClick" Height="40" IsEnabled="False"
+                                    ToolTipService.ToolTip="Resume the last render from its checkpoint with twice the samples">
+                                <StackPanel Orientation="Horizontal" Spacing="6">
+                                    <FontIcon Glyph="&#xE72A;" FontSize="14" />
+                                    <TextBlock Text="Continue" />
+                                </StackPanel>
+                            </Button>
+                        </Grid>
 
                         <StackPanel Spacing="4">
                             <ProgressBar x:Name="Progress" Minimum="0" Maximum="100" Value="0" />
