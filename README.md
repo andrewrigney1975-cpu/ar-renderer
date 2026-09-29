@@ -2,7 +2,7 @@
 
 A physically based, **spectral**, **unbiased** renderer driven by **Metropolis Light Transport**. It is an x64 command-line tool (`prender.exe`) with a lightweight WinUI 3 front end that shows four views of the scene.
 
-![Sphere pyramid, MMLT, 512 mutations/pixel](docs/sphere-pyramid.png)
+![The sphere-pyramid sample scene](docs/render.png)
 
 ## Features
 
@@ -48,6 +48,7 @@ A physically based, **spectral**, **unbiased** renderer driven by **Metropolis L
   - Colour spaces: linear sRGB, ACEScg and Rec.2020, with optional white balance
   - **AOVs**: albedo, normal, depth and position
 - **Checkpoint and resume**: renders can be interrupted and continued. A resumed render is bit-identical to an uninterrupted one.
+- **GPU rendering (optional)**: a SYCL path tracer for Intel GPUs (oneAPI), selected with `--device gpu` or from the UI. It matches the CPU path tracer to within noise. On an Arc A770 it is 2–16× faster than all 24 threads of an i9-12900KF (see [GPU rendering](#gpu-rendering)).
 - **No third-party libraries to install**: the BVH, EXR writer and RGB-to-spectrum fitting are built in. stb, nlohmann/json, doctest, tinyexr/miniz, cgltf and NanoVDB are vendored.
 
 ## Building
@@ -64,6 +65,28 @@ build.cmd gpu        :: optional GPU module (Intel oneAPI DPC++) -> build\bin\pr
 
 The first run fits and caches the RGB-to-spectrum table (`prender_rgb2spec_srgb_v1.bin`), which takes about a second.
 
+### GPU module (optional)
+
+GPU rendering needs:
+
+- the [Intel oneAPI Base Toolkit](https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit.html) 2025.1 or later (for example `winget install Intel.OneAPI.BaseToolkit`);
+- an Intel GPU with a current driver.
+
+Build the renderer first, then:
+
+```bat
+build.cmd gpu        :: -> build\bin\prender_gpu.dll plus the SYCL / Level Zero runtime DLLs
+build.cmd ui         :: rebuild the app so it ships the GPU module next to its copy of prender.exe
+```
+
+- **How it's built and loaded:**
+  - The module is compiled with Intel's DPC++ compiler (`icx -fsycl`). `prender.exe` stays MSVC-built and loads the module at runtime through a small C ABI (`src/gpu/gpu_api.h`).
+  - Without the module, its runtime or a GPU, everything still works on the CPU.
+- **Finding oneAPI:** the script looks under `%ProgramFiles(x86)%\Intel\oneAPI` (override with `ONEAPI_ROOT`) and doesn't need `setvars.bat`.
+- **Target GPUs:**
+  - Kernels are compiled ahead of time for Arc (DG2) with the large register file. For another GPU, set `GPU_AOT_DEVICE` (for example `bmg`).
+  - A generic SPIR-V image is also embedded, so other Intel GPUs work after a one-off JIT compile on first use.
+
 ## Command line
 
 ```bat
@@ -77,10 +100,32 @@ prender scene.prscene.json --checkpoint render.prck --time 10m          :: inter
 prender scene.prscene.json --resume render.prck --mutations 4096       :: ... and continue later
 prender model.glb --out model.png                                     :: glTF / pbrt scenes render directly
 prender kitchen.pbrt --convert kitchen.prscene.json                   :: convert to native JSON
+prender --list-devices                                                :: CPU and GPUs (add --progress json for JSON)
+prender scene.prscene.json --integrator path --device gpu --spp 4096  :: render on the GPU (or gpu:N)
 prender --help
 ```
 
 With `--progress json`, the renderer writes one JSON event per line on stdout. The events are `stage`, `scene`, `progress`, `preview`, `done` and `error`. With `--control stdin`, the renderer accepts `cancel`, then flushes the current estimate and exits with code 3. Ctrl+C does the same. The UI is built on this protocol.
+
+## GPU rendering
+
+`--device gpu` (or `gpu:N`, or `"device": "gpu"` in `render`) runs the **path tracer** on the GPU. It is the same spectral, unbiased algorithm as the CPU path tracer: hero wavelengths, next-event estimation with MIS, and Russian roulette. It runs as a SYCL megakernel over the CPU's BVH.
+
+- **Supported on the GPU:**
+  - Materials: diffuse, conductors, dielectrics (rough, thin and dispersive), coated diffuse and coated conductor, sheen, and checker textures.
+  - Media: homogeneous media, subsurface scattering and interface volumes.
+  - Lights: area, point and constant-environment lights.
+  - Cameras: thin-lens and pinhole.
+  - All pixel filters, plus checkpoint and resume.
+- **Falls back to the CPU, with a warning:**
+  - Integrators other than the path tracer.
+  - Orthographic and realistic-lens cameras (rendered by the CPU path tracer).
+- **Approximated or ignored, with a warning:**
+  - Image textures use their average colour.
+  - Heterogeneous media, normal/bump maps, spot/IES/distant/sun lights and image environments are ignored.
+- **Accuracy:** every material was checked against the CPU path tracer and BDPT. Mean brightness agrees within 0.15%.
+- **Speed:** on an Arc A770 against the 24-thread CPU path tracer, about 6–16× for scenes without coats or sheen and 2–3× with them. The coated-material kernel is much heavier, and every path in the scene pays for it. See [`docs/acceleration-investigation.md`](docs/acceleration-investigation.md) for details.
+- **Checkpoints:** GPU and CPU checkpoints are not interchangeable. Resuming on the other device is refused.
 
 ## The WinUI 3 app
 
@@ -88,7 +133,7 @@ With `--progress json`, the renderer writes one JSON event per line on stdout. T
 
 - **Top, Front and Right** are schematic orthographic views. Drag to pan, use the wheel to zoom, and double-click to frame the scene. Hovering over an object shows its name.
 - **Camera** shows a quick ray-cast preview framed to the film aspect ratio. Drag to orbit, right-drag to pan and use the wheel to dolly. Edited cameras are rendered through a small override scene that includes the original file.
-- **Render panel** controls the camera, integrator, resolution, samples, time limit, seed, light rigs and optional AOVs. **Render** launches `prender.exe`, shows the progressive preview live, and saves results under `%LOCALAPPDATA%\PRenderUI\renders\`. **Continue** resumes the last render from its checkpoint with twice the samples.
+- **Render panel** controls the camera, integrator, resolution, samples, time limit, seed, **device**, light rigs and optional AOVs. The device list is the CPU plus any GPU reported by `prender --list-devices`; choosing a GPU locks the integrator to the path tracer. **Render** launches `prender.exe`, shows the progressive preview live, and saves results under `%LOCALAPPDATA%\PRenderUI\renders\`. **Continue** resumes the last render from its checkpoint with twice the samples.
 - **Open scene** accepts `.prscene.json`, `.gltf`, `.glb` and `.pbrt`. Foreign formats are normalized through `prender --convert`, and meshes are shown as bounding-box proxies.
 
 The app finds `prender.exe` next to itself, in a `build\bin` directory above it, or through `%PRENDER_EXE%`.
@@ -153,7 +198,8 @@ src/media         homogeneous, voxel-grid, NanoVDB and noise media
 src/lights        area/point/spot/IES/distant/environment/sun lights, Preetham sky, light BVH
 src/cameras       thin-lens, orthographic and realistic-lens cameras
 src/scene         scene container, JSON loader (includes, imports, rigs, auto media), glTF and pbrt importers
-src/integrators   path, BDPT, MMLT/PSSMLT
+src/integrators   path, BDPT, MMLT/PSSMLT; host side of the GPU path tracer (scene export, device list)
+src/gpu           prender_gpu.dll: SYCL path-tracing kernel and its C ABI
 src/cli           prender.exe
 src/ui/PRenderUI  WinUI 3 front end (C#, Win2D)
 tests/            doctest unit and integration tests
@@ -166,6 +212,7 @@ schemas/          JSON Schema for .prscene.json
 - MMLT and PSSMLT need a finite `max_depth`, and paths longer than that are not sampled. Use 64 or more for scenes with heavy subsurface scattering. The path tracer and BDPT use Russian roulette.
 - Memory at very high resolutions: the film holds 3 doubles per pixel, so 4K needs 0.2 GB, 8K 0.8 GB and 16K about 3 GB. A 16K checkpoint is the same size on disk, and a float EXR is about 1.5 GB (half: about 0.8 GB). The CLI prints the estimate and warns when it approaches the available memory; the UI shows it under the resolution.
 - The realistic lens camera works with the path tracer only, because it has no closed-form importance for light tracing.
+- The GPU runs only the path tracer, and only on Intel GPUs through oneAPI and Level Zero. Scenes with coats or sheen get a much smaller speed-up (see [GPU rendering](#gpu-rendering)).
 - USD import, OIDN denoising and manifold-exploration mutations are not implemented (see `PLAN.md`).
 - Compressed (ZIP/Blosc) NanoVDB files must be re-saved uncompressed.
 - The pbrt importer covers the common subset. Unsupported features (curves, cylinders, displacement, motion blur, measured BSDFs) are skipped with a warning.
