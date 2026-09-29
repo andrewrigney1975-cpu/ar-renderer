@@ -2,6 +2,8 @@
 
 #include "core/color.h"
 
+#include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -41,7 +43,17 @@ bool ReadImage(const std::string &path, TextureEncoding enc, Image *out, std::st
 // Decode an encoded image (PNG, JPEG, HDR, ...) held in memory.
 bool ReadImageFromMemory(const unsigned char *data, size_t size, TextureEncoding enc, Image *out, std::string *err);
 
-// Write linear float RGB (EXR: float32 uncompressed scanlines; PFM).
+// Supplies one row of linear RGB floats (3 * width values) for row y; may be called from
+// several threads at once.
+using RowFn = std::function<void(int y, float *rgb)>;
+
+// Streamed writers: rows are requested on demand, so no full-resolution copy is made (needed for
+// 8K/16K output). EXR uses ZIP compression (16-line blocks, encoded in parallel) unless zip=false.
+bool WriteEXRRows(const std::string &path, int w, int h, const RowFn &rows, bool half, bool zip, std::string *err);
+bool WritePFMRows(const std::string &path, int w, int h, const RowFn &rows, std::string *err);
+bool WriteLDRBytes(const std::string &path, int w, int h, const uint8_t *rgb, std::string *err);
+
+// Write linear float RGB (EXR: ZIP-compressed float32 scanlines; PFM).
 bool WriteEXR(const std::string &path, const Image &img, bool half, std::string *err);
 bool WritePFM(const std::string &path, const Image &img, std::string *err);
 // Write display-referred [0,1] values (already tone-mapped and encoded) as 8-bit PNG/JPEG.

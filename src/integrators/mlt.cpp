@@ -288,7 +288,9 @@ bool MLTIntegrator::Render(const Scene &scene, Film &film, RenderControl &contro
 
     // ---- Run the chains in rounds (each round ~1 mutation per film pixel).
     const int64_t pixels = film.SamplePixelCount();
-    const int64_t perChainPerRound = std::max<int64_t>(1, pixels / nChains);
+    // ~1 mutation per pixel per round, capped so progress, previews and cancel stay responsive at
+    // 8K/16K (the per-chain total is exact, so the cap never changes the result).
+    const int64_t perChainPerRound = Clamp(pixels / nChains, int64_t(1), int64_t(4096));
     const double targetMpp = settings_.timeLimit > 0 ? std::numeric_limits<double>::infinity()
                                                      : std::max(0.01, settings_.mutationsPerPixel);
     // Integer per-chain budget: every chain runs exactly the same number of mutations, and the

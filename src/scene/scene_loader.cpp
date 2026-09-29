@@ -1239,6 +1239,7 @@ void Loader::ParseRender() {
                 Fail("unknown tonemap '" + o["tonemap"].get<std::string>() + "'");
             spec.half = GetBool(o, "half", false);
             spec.aov = GetString(o, "aov", "");
+            spec.zip = GetString(o, "compression", "zip") != "none";
         }
         if (!spec.file.empty()) rs.outputs.push_back(spec);
     }

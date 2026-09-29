@@ -11,7 +11,7 @@
 
 namespace pr {
 
-static const char kCheckpointMagic[8] = {'P', 'R', 'C', 'K', 'P', 'T', '0', '1'};
+static const char kCheckpointMagic[8] = {'P', 'R', 'C', 'K', 'P', 'T', '0', '2'};
 
 static void PutHeader(BinaryWriter &w, const RenderControl &c, const IntegratorSettings &s, const Film &film) {
     w.PutBytes(kCheckpointMagic, 8);
@@ -27,9 +27,8 @@ static void PutHeader(BinaryWriter &w, const RenderControl &c, const IntegratorS
 bool WriteCheckpoint(const RenderControl &control, const IntegratorSettings &s, const Film &film,
                      const std::function<void(BinaryWriter &)> &body, std::string *err) {
     if (control.checkpointPath.empty()) return true;
-    BinaryWriter w;
-    PutHeader(w, control, s, film);
-    film.Serialize(w);
+    BinaryWriter hdr, w;
+    PutHeader(hdr, control, s, film);
     body(w);
     std::string tmp = control.checkpointPath + ".tmp";
     FILE *f = _wfopen(Utf8Path(tmp).wstring().c_str(), L"wb");
@@ -37,7 +36,11 @@ bool WriteCheckpoint(const RenderControl &control, const IntegratorSettings &s, 
         *err = "cannot write checkpoint " + tmp;
         return false;
     }
-    bool ok = std::fwrite(w.Data().data(), 1, w.Data().size(), f) == w.Data().size();
+    // Header, then the film streamed in chunks (it can be gigabytes at 16K), then the body.
+    bool ok = std::fwrite(hdr.Data().data(), 1, hdr.Data().size(), f) == hdr.Data().size() && film.WriteAccumulators(f);
+    uint64_t bodySize = w.Data().size();
+    ok = ok && std::fwrite(&bodySize, sizeof(bodySize), 1, f) == 1 &&
+         std::fwrite(w.Data().data(), 1, w.Data().size(), f) == w.Data().size();
     ok = std::fclose(f) == 0 && ok;
     std::error_code ec;
     if (ok) std::filesystem::rename(Utf8Path(tmp), Utf8Path(control.checkpointPath), ec);
@@ -55,24 +58,28 @@ bool ReadCheckpoint(const RenderControl &control, const IntegratorSettings &s, F
         *err = "cannot open checkpoint " + control.resumePath;
         return false;
     }
-    std::vector<uint8_t> data;
-    uint8_t buf[65536];
-    size_t n;
-    while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) data.insert(data.end(), buf, buf + n);
-    std::fclose(f);
     BinaryWriter expected;
     PutHeader(expected, control, s, film);
     const auto &hdr = expected.Data();
-    if (data.size() < hdr.size() || std::memcmp(data.data(), hdr.data(), 8) != 0) {
+    std::vector<uint8_t> got(hdr.size());
+    bool readHeader = std::fread(got.data(), 1, got.size(), f) == got.size();
+    if (!readHeader || std::memcmp(got.data(), hdr.data(), 8) != 0) {
+        std::fclose(f);
         *err = control.resumePath + " is not a prender checkpoint";
         return false;
     }
-    if (std::memcmp(data.data(), hdr.data(), hdr.size()) != 0) {
+    if (std::memcmp(got.data(), hdr.data(), hdr.size()) != 0) {
+        std::fclose(f);
         *err = control.resumePath + " was made for a different scene, integrator, resolution, seed or depth";
         return false;
     }
-    BinaryReader r(std::vector<uint8_t>(data.begin() + hdr.size(), data.end()));
-    if (!film.Deserialize(r) || !body(r) || !r.Ok()) {
+    uint64_t bodySize = 0;
+    bool ok = film.ReadAccumulators(f) && std::fread(&bodySize, sizeof(bodySize), 1, f) == 1 && bodySize < (uint64_t(1) << 40);
+    std::vector<uint8_t> bodyData(ok ? size_t(bodySize) : 0);
+    ok = ok && std::fread(bodyData.data(), 1, bodyData.size(), f) == bodyData.size();
+    std::fclose(f);
+    BinaryReader r(std::move(bodyData));
+    if (!ok || !body(r) || !r.Ok()) {
         *err = control.resumePath + " is truncated or corrupt";
         return false;
     }

@@ -1,5 +1,9 @@
 #include "core/film.h"
 
+#include "core/parallel.h"
+
+#include <vector>
+
 namespace pr {
 
 Filter::Filter(const FilterSettings &s) : type_(s.type), radius_(s.radius) {
@@ -54,21 +58,76 @@ void Film::Clear() {
     for (size_t i = 0; i < n; ++i) xyz_[i].store(0.0, std::memory_order_relaxed);
 }
 
-void Film::Serialize(BinaryWriter &w) const {
+bool Film::WriteAccumulators(FILE *f) const {
     uint64_t n = uint64_t(settings_.width) * settings_.height * 3;
-    w.Put(n);
-    for (uint64_t i = 0; i < n; ++i) w.Put(xyz_[i].load(std::memory_order_relaxed));
-}
-
-bool Film::Deserialize(BinaryReader &r) {
-    uint64_t n;
-    if (!r.Get(&n) || n != uint64_t(settings_.width) * settings_.height * 3) return false;
-    for (uint64_t i = 0; i < n; ++i) {
-        double v;
-        if (!r.Get(&v)) return false;
-        xyz_[i].store(v, std::memory_order_relaxed);
+    if (std::fwrite(&n, sizeof(n), 1, f) != 1) return false;
+    std::vector<double> chunk(1 << 20);
+    for (uint64_t i = 0; i < n; i += chunk.size()) {
+        size_t m = size_t(std::min<uint64_t>(chunk.size(), n - i));
+        for (size_t k = 0; k < m; ++k) chunk[k] = xyz_[i + k].load(std::memory_order_relaxed);
+        if (std::fwrite(chunk.data(), sizeof(double), m, f) != m) return false;
     }
     return true;
+}
+
+bool Film::ReadAccumulators(FILE *f) {
+    uint64_t n;
+    if (std::fread(&n, sizeof(n), 1, f) != 1 || n != uint64_t(settings_.width) * settings_.height * 3) return false;
+    std::vector<double> chunk(1 << 20);
+    for (uint64_t i = 0; i < n; i += chunk.size()) {
+        size_t m = size_t(std::min<uint64_t>(chunk.size(), n - i));
+        if (std::fread(chunk.data(), sizeof(double), m, f) != m) return false;
+        for (size_t k = 0; k < m; ++k) xyz_[i + k].store(chunk[k], std::memory_order_relaxed);
+    }
+    return true;
+}
+
+void Film::ResolveRow(int y, double scale, float *rgb) const {
+    for (int x = 0; x < settings_.width; ++x) {
+        size_t idx = 3 * (size_t(y) * settings_.width + x);
+        double v[3] = {xyz_[idx].load(), xyz_[idx + 1].load(), xyz_[idx + 2].load()};
+        RGB c = ToOutput(v, scale, settings_.colorSpace);
+        rgb[3 * x] = c.r;
+        rgb[3 * x + 1] = c.g;
+        rgb[3 * x + 2] = c.b;
+    }
+}
+
+void Film::ResolveDisplayRow(int y, double scale, ToneMap tm, uint8_t *rgb) const {
+    for (int x = 0; x < settings_.width; ++x) {
+        size_t idx = 3 * (size_t(y) * settings_.width + x);
+        double v[3] = {xyz_[idx].load(), xyz_[idx + 1].load(), xyz_[idx + 2].load()};
+        RGB c = ApplyToneMap(tm, ToOutput(v, scale, ColorSpaceId::sRGB));
+        rgb[3 * x] = uint8_t(Clamp(int(SRGBEncode(c.r) * 255.f + 0.5f), 0, 255));
+        rgb[3 * x + 1] = uint8_t(Clamp(int(SRGBEncode(c.g) * 255.f + 0.5f), 0, 255));
+        rgb[3 * x + 2] = uint8_t(Clamp(int(SRGBEncode(c.b) * 255.f + 0.5f), 0, 255));
+    }
+}
+
+Image Film::ResolvePreview(double scale, ToneMap tm, int maxDim) const {
+    const int w = settings_.width, h = settings_.height;
+    int f = std::max(1, (std::max(w, h) + maxDim - 1) / std::max(1, maxDim));
+    int pw = std::max(1, w / f), ph = std::max(1, h / f);
+    Image img(pw, ph);
+    ParallelFor(ph, [&](int64_t py, int) {
+        for (int px = 0; px < pw; ++px) {
+            // Average in linear light, then tone map.
+            double acc[3] = {0, 0, 0};
+            int n = 0;
+            for (int y = int(py) * f; y < std::min(h, int(py + 1) * f); ++y)
+                for (int x = px * f; x < std::min(w, (px + 1) * f); ++x) {
+                    size_t idx = 3 * (size_t(y) * w + x);
+                    acc[0] += xyz_[idx].load();
+                    acc[1] += xyz_[idx + 1].load();
+                    acc[2] += xyz_[idx + 2].load();
+                    ++n;
+                }
+            for (double &a : acc) a /= std::max(1, n);
+            RGB c = ApplyToneMap(tm, ToOutput(acc, scale, ColorSpaceId::sRGB));
+            img.Set(px, int(py), {SRGBEncode(c.r), SRGBEncode(c.g), SRGBEncode(c.b)});
+        }
+    });
+    return img;
 }
 
 void Film::AddSample(Vec2f p, const SampledSpectrum &L, const SampledWavelengths &lambda, float weight) {

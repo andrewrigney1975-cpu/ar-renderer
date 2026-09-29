@@ -43,7 +43,8 @@ A physically based, **spectral**, **unbiased** renderer driven by **Metropolis L
   - Native JSON scenes, plus **glTF 2.0** (`.gltf`/`.glb`, including KHR transmission, volume, IOR, dispersion, sheen, clearcoat, emissive strength and punctual lights) and **pbrt-v4** scenes. These can be rendered directly, pulled in with `include`/`import`, or converted with `--convert`.
   - OBJ and PLY meshes; PNG, JPEG, HDR, EXR and PFM textures.
 - **Outputs**
-  - OpenEXR (float or half), PFM, and PNG/JPEG with ACES or Reinhard tone mapping
+  - OpenEXR (float or half, ZIP-compressed), PFM, and PNG/JPEG with ACES or Reinhard tone mapping
+  - Up to **16K** (15360×8640). Outputs and checkpoints are streamed row by row, so no full-resolution copies are made; progressive previews are downscaled.
   - Colour spaces: linear sRGB, ACEScg and Rec.2020, with optional white balance
   - **AOVs**: albedo, normal, depth and position
 - **Checkpoint and resume**: renders can be interrupted and continued. A resumed render is bit-identical to an uninterrupted one.
@@ -70,6 +71,7 @@ prender scene.prscene.json --integrator mmlt --mutations 1024 --res 1920x1080 --
 prender scene.prscene.json --add-rig fog --time 5m --preview preview.png
 prender scene.prscene.json --integrator path --spp 4096 --out reference.pfm
 prender scene.prscene.json --aov albedo=albedo.exr --aov normal=normal.exr
+prender scene.prscene.json --res 8k --out big.exr --out big.png          :: presets: 720p 1080p 1440p 4k 8k 16k
 prender scene.prscene.json --checkpoint render.prck --time 10m          :: interrupt any time (Ctrl+C) ...
 prender scene.prscene.json --resume render.prck --mutations 4096       :: ... and continue later
 prender model.glb --out model.png                                     :: glTF / pbrt scenes render directly
@@ -161,6 +163,7 @@ schemas/          JSON Schema for .prscene.json
 ## Known limitations
 
 - MMLT and PSSMLT need a finite `max_depth`, and paths longer than that are not sampled. Use 64 or more for scenes with heavy subsurface scattering. The path tracer and BDPT use Russian roulette.
+- Memory at very high resolutions: the film holds 3 doubles per pixel, so 4K needs 0.2 GB, 8K 0.8 GB and 16K about 3 GB. A 16K checkpoint is the same size on disk, and a float EXR is about 1.5 GB (half: about 0.8 GB). The CLI prints the estimate and warns when it approaches the available memory; the UI shows it under the resolution.
 - The realistic lens camera works with the path tracer only, because it has no closed-form importance for light tracing.
 - USD import, OIDN denoising and manifold-exploration mutations are not implemented (see `PLAN.md`).
 - Compressed (ZIP/Blosc) NanoVDB files must be re-saved uncompressed.

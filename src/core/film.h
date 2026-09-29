@@ -6,6 +6,7 @@
 #include "core/spectrum.h"
 
 #include <atomic>
+#include <cstdio>
 #include <memory>
 #include <string>
 
@@ -63,9 +64,17 @@ class Film {
                    float weight = 1.f);
     void AddXYZ(Vec2f pRaster, const XYZ &xyz);
     void Clear();
-    // Checkpointing of the raw accumulators.
-    void Serialize(BinaryWriter &w) const;
-    bool Deserialize(BinaryReader &r);
+    // Checkpointing of the raw accumulators, streamed to/from a file in chunks (no full copy).
+    bool WriteAccumulators(FILE *f) const;
+    bool ReadAccumulators(FILE *f);
+    // Bytes held by the accumulators for a given resolution (for memory estimates).
+    static uint64_t MemoryBytes(int width, int height) { return uint64_t(width) * height * 3 * sizeof(double); }
+
+    // Per-row resolves (thread-safe), used by the streamed writers.
+    void ResolveRow(int y, double scale, float *rgb) const;              // linear, film colour space
+    void ResolveDisplayRow(int y, double scale, ToneMap tm, uint8_t *rgb) const;  // tone-mapped sRGB bytes
+    // Display-referred image downscaled (box filter) to at most maxDim pixels on the long side.
+    Image ResolvePreview(double scale, ToneMap tm, int maxDim) const;
 
     // Resolve accumulated values times 'scale' to linear RGB in the film colour space.
     Image Resolve(double scale) const;

@@ -399,3 +399,14 @@ Built and verified: renderer, tests (`build.cmd test`: 30 cases passing), WinUI 
 | CLI | Done | JSON progress protocol, previews, cancel with flush, budgets, **checkpoint/resume (bit-exact)**. |
 | WinUI 3 app | Done | Four views, glTF/pbrt opening via `--convert` (mesh proxies), camera editing, live preview, **Continue** (resume), AOV option. |
 | Not implemented | — | USD import, OIDN denoise post-pass, manifold-exploration mutations. |
+
+---
+
+## 15. Backlog
+
+| # | Item | Notes and first steps |
+|---|---|---|
+| 1 | **Use all capabilities of modern Intel x64 CPUs (12th gen and later)** | Hybrid P-core/E-core scheduling: finer-grained work stealing so E-cores don't straggle, and thread priority/affinity hints. Wider SIMD: AVX2/FMA today (AVX-512 is disabled on consumer Alder/Raptor Lake; AVX10 on later parts), packet/SIMD BVH traversal (BVH4/BVH8), SoA spectral math. Profile guided optimization and cache-friendly layouts (compact BVH nodes, ray sorting). Measure with VTune before and after. |
+| 2 | **Investigate GPU rendering with oneAPI (Intel dGPUs, e.g. Arc)** | Evaluate SYCL/DPC++ (oneAPI) for the core kernels and Embree 4 SYCL for GPU ray tracing on Arc. Wavefront path tracing first (path/BDPT), then MLT with many chains per GPU. Keep spectral, unbiased semantics identical and validate against the CPU reference with the existing agreement tests. Deliverable: a spike report on feasibility, performance and toolchain impact (the Intel oneAPI DPC++ compiler alongside MSVC). |
+| 3 | **User-selectable render device (CPU or GPU)** | Add a `--device cpu|gpu[:index]` CLI option and `render.device` in the scene, report the available devices (`--list-devices`), and add a Device selector to the UI render panel. Fall back to the CPU with a warning when no GPU is available or the integrator or feature isn't supported on the GPU. Depends on #2. |
+| 4 | **Add 4K, 8K and 16K output resolutions** — ✅ Done (v0.3) | UI presets (4K 3840×2160, 8K 7680×4320, 16K 15360×8640) and `--res 4k|8k|16k`. Streamed row-by-row EXR (ZIP, blocks compressed in parallel), PFM and PNG writers; chunked checkpoint I/O; downscaled previews (max 2048 px); MLT rounds capped for responsiveness; film memory estimate and warning in the CLI and UI; huge results decoded at display size in the UI. Verified: a 16K render writes a 1.5 GB EXR, a 380 MB PNG and a 3 GB checkpoint. |

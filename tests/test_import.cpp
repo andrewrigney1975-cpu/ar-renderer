@@ -2,6 +2,7 @@
 
 #include "core/film.h"
 #include "core/image.h"
+#include "core/rng.h"
 #include "integrators/integrator.h"
 #include "scene/importers.h"
 #include "scene/scene_loader.h"
@@ -202,4 +203,33 @@ TEST_CASE("EXR round trip") {
     REQUIRE(back.Width() == 3);
     CHECK(back.Get(0, 0).b == doctest::Approx(3));
     CHECK(back.Get(2, 1).g == doctest::Approx(1e3));
+}
+
+TEST_CASE("EXR ZIP writer: multi-block, half and float, partial last block") {
+    const int w = 53, h = 37;  // 37 rows = 2 full 16-line blocks + a partial one
+    Image img(w, h);
+    RNG rng(3);
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x)
+            img.Set(x, y, RGB(rng.UniformFloat() * 4, float(x) / w, float(y) / h + (x == y ? 100.f : 0.f)));
+    std::string err;
+    for (bool half : {false, true}) {
+        fs::path p = TestDir() / (half ? "zip_half.exr" : "zip_float.exr");
+        REQUIRE(WriteEXRRows(p.string(), w, h, [&](int y, float *rgb) {
+            for (int x = 0; x < w; ++x) {
+                RGB c = img.Get(x, y);
+                rgb[3 * x] = c.r; rgb[3 * x + 1] = c.g; rgb[3 * x + 2] = c.b;
+            }
+        }, half, true, &err));
+        Image back;
+        REQUIRE_MESSAGE(ReadImage(p.string(), TextureEncoding::Linear, &back, &err), err);
+        REQUIRE(back.Width() == w);
+        REQUIRE(back.Height() == h);
+        double maxErr = 0;
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x)
+                for (int c = 0; c < 3; ++c)
+                    maxErr = std::max(maxErr, double(std::abs(back.Get(x, y)[c] - img.Get(x, y)[c]) / std::max(1.f, img.Get(x, y)[c])));
+        CHECK(maxErr < (half ? 1e-3 : 1e-7));
+    }
 }

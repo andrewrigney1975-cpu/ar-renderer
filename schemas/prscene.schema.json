@@ -1185,7 +1185,7 @@
                       },
                       "half": {
                         "type": "boolean",
-                        "description": "EXR: store half floats"
+                        "description": "EXR: store half floats (recommended for 8K/16K: about 2x smaller)"
                       },
                       "aov": {
                         "enum": [
@@ -1194,6 +1194,13 @@
                           "depth",
                           "position"
                         ]
+                      },
+                      "compression": {
+                        "enum": [
+                          "zip",
+                          "none"
+                        ],
+                        "description": "EXR compression (default zip)"
                       }
                     },
                     "required": [

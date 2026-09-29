@@ -38,7 +38,8 @@ public sealed partial class MainWindow : Window
     private static readonly (string Label, int W, int H)[] Resolutions =
     {
         ("480 × 270", 480, 270), ("960 × 540", 960, 540), ("1280 × 720", 1280, 720), ("1920 × 1080", 1920, 1080),
-        ("800 × 800", 800, 800),
+        ("800 × 800", 800, 800), ("4K UHD · 3840 × 2160", 3840, 2160), ("8K UHD · 7680 × 4320", 7680, 4320),
+        ("16K · 15360 × 8640", 15360, 8640),
     };
 
     public MainWindow()
@@ -204,7 +205,33 @@ public sealed partial class MainWindow : Window
         if (_doc is not null) SamplesBox.Value = IsMlt() ? _doc.MutationsPerPixel : _doc.Spp;
     }
 
-    private void OnResolutionChanged(object sender, SelectionChangedEventArgs e) => ApplyFilmAspect();
+    private void OnResolutionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        ApplyFilmAspect();
+        UpdateResolutionInfo();
+    }
+
+    // Film memory estimate (3 doubles per pixel, like the renderer) and a warning when it gets
+    // close to the machine's available memory.
+    private void UpdateResolutionInfo()
+    {
+        var (w, h) = SelectedResolution;
+        double filmGB = (double)w * h * 3 * sizeof(double) / (1 << 30);
+        double totalGB = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes / (double)(1 << 30);
+        double mp = (double)w * h / 1e6;
+        string info = $"{mp:0.#} MP · film ≈ {(filmGB < 1 ? $"{filmGB * 1024:0} MB" : $"{filmGB:0.0} GB")}";
+        if (filmGB >= 0.5) info += $" · checkpoint ≈ {filmGB:0.0} GB on disk · outputs streamed, preview downscaled";
+        if (totalGB > 0 && filmGB > totalGB * 0.5)
+        {
+            info += $" — warning: this machine has {totalGB:0} GB of memory";
+            ResolutionInfo.Foreground = new SolidColorBrush(Microsoft.UI.Colors.OrangeRed);
+        }
+        else
+        {
+            ResolutionInfo.ClearValue(TextBlock.ForegroundProperty);
+        }
+        ResolutionInfo.Text = info;
+    }
 
     private void OnCameraEdited()
     {
@@ -482,7 +509,8 @@ public sealed partial class MainWindow : Window
             using var stream = new InMemoryRandomAccessStream();
             await stream.WriteAsync(bytes.AsBuffer());
             stream.Seek(0);
-            var bmp = new BitmapImage();
+            // Decode huge results (8K/16K) at display size only.
+            var bmp = new BitmapImage { DecodePixelWidth = 2048, DecodePixelType = DecodePixelType.Logical };
             await bmp.SetSourceAsync(stream);
             if (version != _previewVersion) return;
             RenderImage.Source = bmp;

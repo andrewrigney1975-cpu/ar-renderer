@@ -126,6 +126,8 @@
                             <NumberBox x:Name="SeedBox" Grid.Row="2" Grid.Column="1" Header="Seed" Minimum="0" Maximum="2147483647"
                                        SpinButtonPlacementMode="Compact" Value="1" />
                         </Grid>
+                        <TextBlock x:Name="ResolutionInfo" Style="{StaticResource CaptionTextBlockStyle}" TextWrapping="Wrap"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
 
                         <StackPanel Spacing="4">
                             <TextBlock Text="Light rigs" Style="{StaticResource CaptionTextBlockStyle}"

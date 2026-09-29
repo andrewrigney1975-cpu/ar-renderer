@@ -37,7 +37,7 @@ namespace fs = std::filesystem;
 
 namespace {
 
-constexpr const char *kVersion = "0.2.0";
+constexpr const char *kVersion = "0.3.0";
 
 enum ExitCode { ExitOK = 0, ExitSceneError = 1, ExitIOError = 2, ExitCancelled = 3 };
 
@@ -83,7 +83,7 @@ void PrintUsage() {
         "  --time <dur>               stop after a wall-clock budget, e.g. 90s, 10m, 1h\n"
         "  --threads <n>              worker threads (default: all logical cores)\n"
         "  --seed <n>                 random seed\n"
-        "  --res <w>x<h>              override film resolution\n"
+        "  --res <w>x<h>|<preset>     override film resolution (presets: 720p 1080p 1440p 4k 8k 16k)\n"
         "  --out <file>               output (repeatable): .exr .pfm .png .jpg\n"
         "  --aov <name>=<file>        auxiliary output: albedo, normal, depth, position (repeatable)\n"
         "  --aov-spp <n>              samples per pixel for AOVs (default 16)\n"
@@ -100,6 +100,34 @@ void PrintUsage() {
         "  --version | --help\n\n"
         "exit codes: 0 ok, 1 scene/argument error, 2 I/O error, 3 cancelled\n",
         kVersion);
+}
+
+// "WxH" or a named preset (UHD family: 4K = 3840x2160, 8K = 7680x4320, 16K = 15360x8640).
+bool ParseResolution(const std::string &v, int *w, int *h) {
+    static const struct {
+        const char *name;
+        int w, h;
+    } presets[] = {{"720p", 1280, 720},  {"1080p", 1920, 1080}, {"hd", 1920, 1080},  {"1440p", 2560, 1440},
+                   {"4k", 3840, 2160},   {"uhd", 3840, 2160},   {"8k", 7680, 4320},  {"16k", 15360, 8640}};
+    std::string l = v;
+    for (char &c : l) c = char(std::tolower((unsigned char)c));
+    for (const auto &p : presets)
+        if (l == p.name) {
+            *w = p.w;
+            *h = p.h;
+            return true;
+        }
+    return std::sscanf(v.c_str(), "%dx%d", w, h) == 2 && *w > 0 && *h > 0 && *w <= 65536 && *h <= 65536;
+}
+
+// Available physical memory in bytes (0 if unknown).
+uint64_t AvailablePhysicalMemory() {
+#ifdef _WIN32
+    MEMORYSTATUSEX ms{};
+    ms.dwLength = sizeof(ms);
+    if (GlobalMemoryStatusEx(&ms)) return ms.ullAvailPhys;
+#endif
+    return 0;
 }
 
 bool ParseArgs(int argc, char **argv, Args *a, std::string *err) {
@@ -165,8 +193,8 @@ bool ParseArgs(int argc, char **argv, Args *a, std::string *err) {
             a->seed = std::strtoull(v, nullptr, 10);
         } else if (s == "--res") {
             if (!(v = need(i))) return false;
-            if (std::sscanf(v, "%dx%d", &a->load.width, &a->load.height) != 2 || a->load.width <= 0 || a->load.height <= 0) {
-                *err = std::string("bad resolution: ") + v;
+            if (!ParseResolution(v, &a->load.width, &a->load.height)) {
+                *err = std::string("bad resolution: ") + v + " (WxH, 720p, 1080p, 1440p, 4k, 8k or 16k)";
                 return false;
             }
         } else if (s == "--out" || s == "-o") {
@@ -323,10 +351,16 @@ bool WriteOutput(const Film &film, double scale, const OutputSpec &spec, std::st
     fs::path p = Utf8Path(spec.file);
     if (p.has_parent_path()) fs::create_directories(p.parent_path(), ec);
     std::string ext = Lower(p.extension().string());
-    if (ext == ".exr") return WriteEXR(spec.file, film.Resolve(scale), spec.half, err);
-    if (ext == ".pfm") return WritePFM(spec.file, film.Resolve(scale), err);
-    if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp" || ext == ".tga")
-        return WriteLDR(spec.file, film.ResolveDisplay(scale, spec.toneMap), err);
+    // Rows are resolved on demand: no full-resolution float copy (8K/16K friendly).
+    auto rows = [&](int y, float *rgb) { film.ResolveRow(y, scale, rgb); };
+    if (ext == ".exr") return WriteEXRRows(spec.file, film.Width(), film.Height(), rows, spec.half, spec.zip, err);
+    if (ext == ".pfm") return WritePFMRows(spec.file, film.Width(), film.Height(), rows, err);
+    if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp" || ext == ".tga") {
+        const int w = film.Width(), h = film.Height();
+        std::vector<uint8_t> bytes(size_t(w) * h * 3);
+        ParallelFor(h, [&](int64_t y, int) { film.ResolveDisplayRow(int(y), scale, spec.toneMap, bytes.data() + size_t(y) * w * 3); }, 16);
+        return WriteLDRBytes(spec.file, w, h, bytes.data(), err);
+    }
     *err = "unsupported output format: " + spec.file;
     return false;
 }
@@ -418,6 +452,14 @@ int main(int argc, char **argv) {
     }
 
     size_t nLights = scene->lights.size();
+    // Memory: the film accumulators dominate at 8K/16K (3 doubles per pixel).
+    uint64_t filmBytes = Film::MemoryBytes(rs.film.width, rs.film.height);
+    uint64_t avail = AvailablePhysicalMemory();
+    LogInfo("film memory: {:.2f} GB{}", filmBytes / 1073741824.0,
+            avail ? std::format(" ({:.1f} GB physical memory available)", avail / 1073741824.0) : std::string());
+    if (avail && filmBytes > avail * 8 / 10)
+        LogWarning("the film needs {:.1f} GB but only {:.1f} GB of memory is available; expect heavy paging",
+                   filmBytes / 1073741824.0, avail / 1073741824.0);
     LogInfo("scene: {} primitives, {} lights, {} media, camera '{}', {}x{}, integrator {}", scene->primitives.size(),
             nLights, scene->media.size(), rs.cameraName, rs.film.width, rs.film.height, IntegratorName(rs.integrator.type));
     Emit({{"event", "scene"},
@@ -428,7 +470,8 @@ int main(int argc, char **argv) {
           {"width", rs.film.width},
           {"height", rs.film.height},
           {"integrator", IntegratorName(rs.integrator.type)},
-          {"threads", ThreadCount()}});
+          {"threads", ThreadCount()},
+          {"film_memory_mb", double(filmBytes) / 1048576.0}});
     if (args.validate) {
         Emit({{"event", "done"}, {"outputs", json::array()}, {"validated", true}});
         LogInfo("scene is valid");
@@ -467,7 +510,8 @@ int main(int argc, char **argv) {
     control.onPreview = [&](const Film &f, double scale) {
         std::string tmp = args.preview + ".tmp.png";
         std::string e;
-        if (!WriteLDR(tmp, f.ResolveDisplay(scale, ToneMap::ACES), &e)) return;
+        // Previews are downscaled so they stay cheap at 8K/16K.
+        if (!WriteLDR(tmp, f.ResolvePreview(scale, ToneMap::ACES, 2048), &e)) return;
         std::error_code ec;
         fs::rename(Utf8Path(tmp), Utf8Path(args.preview), ec);
         if (ec) {

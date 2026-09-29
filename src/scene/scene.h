@@ -44,6 +44,7 @@ struct OutputSpec {
     std::string file;
     ToneMap toneMap = ToneMap::ACES;
     bool half = false;
+    bool zip = true;  // EXR: ZIP compression
     std::string aov;  // empty: beauty; else albedo | normal | depth | position
 };
 

@@ -6,6 +6,9 @@
 #include <filesystem>
 
 #include "core/fsutil.h"
+#include "core/parallel.h"
+
+#include "miniz.h"
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_WINDOWS_UTF8
@@ -127,7 +130,7 @@ bool ReadImageFromMemory(const unsigned char *data, size_t size, TextureEncoding
 }
 
 // ---------------------------------------------------------------------------------------------
-// Minimal OpenEXR writer: scanline, no compression, B/G/R channels.
+// Minimal OpenEXR writer: scanline, ZIP-compressed (or uncompressed), B/G/R channels, streamed by row.
 namespace {
 
 void Put(std::vector<uint8_t> &b, const void *p, size_t n) {
@@ -166,10 +169,10 @@ uint16_t FloatToHalf(float f) {
 
 } // namespace
 
-bool WriteEXR(const std::string &path, const Image &img, bool half, std::string *err) {
-    const int w = img.Width(), h = img.Height();
+bool WriteEXRRows(const std::string &path, int w, int h, const RowFn &rows, bool half, bool zip, std::string *err) {
     const int pixelType = half ? 1 : 2;
     const int bytesPer = half ? 2 : 4;
+    const int linesPerBlock = zip ? 16 : 1;  // ZIP_COMPRESSION packs 16 scanlines per block
     std::vector<uint8_t> b;
     PutT<uint32_t>(b, 20000630);
     PutT<uint32_t>(b, 2);
@@ -186,7 +189,7 @@ bool WriteEXR(const std::string &path, const Image &img, bool half, std::string 
         PutT<uint8_t>(ch, 0);
         Attr(b, "channels", "chlist", ch);
     }
-    Attr(b, "compression", "compression", {0});
+    Attr(b, "compression", "compression", {uint8_t(zip ? 3 : 0)});
     {
         std::vector<uint8_t> box;
         PutT<int32_t>(box, 0); PutT<int32_t>(box, 0); PutT<int32_t>(box, w - 1); PutT<int32_t>(box, h - 1);
@@ -211,73 +214,136 @@ bool WriteEXR(const std::string &path, const Image &img, bool half, std::string 
     }
     PutT<uint8_t>(b, 0);  // end of header
 
-    const size_t lineBytes = size_t(w) * 3 * bytesPer;
-    uint64_t offset = b.size() + size_t(h) * 8;
-    for (int y = 0; y < h; ++y) {
-        PutT<uint64_t>(b, offset);
-        offset += 8 + lineBytes;
-    }
-    for (int y = 0; y < h; ++y) {
-        PutT<int32_t>(b, y);
-        PutT<int32_t>(b, int32_t(lineBytes));
-        for (int c : {2, 1, 0}) {
-            for (int x = 0; x < w; ++x) {
-                float v = img.Get(x, y)[c];
-                if (half) PutT<uint16_t>(b, FloatToHalf(v));
-                else PutT<float>(b, v);
-            }
-        }
-    }
     FILE *f = _wfopen(Utf8Path(path).wstring().c_str(), L"wb");
     if (!f) {
         *err = "cannot open " + path + " for writing";
         return false;
     }
+    const int nBlocks = (h + linesPerBlock - 1) / linesPerBlock;
     bool ok = std::fwrite(b.data(), 1, b.size(), f) == b.size();
-    std::fclose(f);
+    // Offset table placeholder, filled in once the (variable-size) blocks are written.
+    const int64_t tablePos = int64_t(b.size());
+    std::vector<uint64_t> offsets(size_t(nBlocks), 0);
+    ok = ok && std::fwrite(offsets.data(), 8, offsets.size(), f) == offsets.size();
+    int64_t pos = tablePos + int64_t(nBlocks) * 8;
+
+    // Encode blocks in parallel batches (rows are resolved on demand, so no full-image copy),
+    // then write them in order.
+    const size_t lineBytes = size_t(w) * 3 * bytesPer;
+    const int batch = std::max(1, ThreadCount() * 4);
+    std::vector<std::vector<uint8_t>> encoded(static_cast<size_t>(batch));
+    for (int first = 0; first < nBlocks && ok; first += batch) {
+        int count = std::min(batch, nBlocks - first);
+        ParallelFor(count, [&](int64_t k, int) {
+            int blk = first + int(k);
+            int y0 = blk * linesPerBlock, y1 = std::min(h, y0 + linesPerBlock);
+            std::vector<float> row(size_t(w) * 3);
+            std::vector<uint8_t> raw(lineBytes * size_t(y1 - y0));
+            uint8_t *dst = raw.data();
+            for (int y = y0; y < y1; ++y) {
+                rows(y, row.data());
+                for (int c : {2, 1, 0})
+                    for (int x = 0; x < w; ++x) {
+                        float v = row[size_t(x) * 3 + c];
+                        if (half) {
+                            uint16_t hv = FloatToHalf(v);
+                            std::memcpy(dst, &hv, 2);
+                            dst += 2;
+                        } else {
+                            std::memcpy(dst, &v, 4);
+                            dst += 4;
+                        }
+                    }
+            }
+            std::vector<uint8_t> &out = encoded[size_t(k)];
+            out.clear();
+            PutT<int32_t>(out, y0);
+            if (zip) {
+                // OpenEXR ZIP: interleave even/odd bytes, delta-predict, then zlib-compress.
+                size_t n = raw.size();
+                std::vector<uint8_t> tmp(n);
+                uint8_t *t1 = tmp.data(), *t2 = tmp.data() + (n + 1) / 2;
+                for (size_t i = 0; i < n; ++i) (i & 1 ? *t2++ : *t1++) = raw[i];
+                for (size_t i = n - 1; i > 0; --i) tmp[i] = uint8_t(int(tmp[i]) - int(tmp[i - 1]) + 128);
+                mz_ulong clen = mz_compressBound(mz_ulong(n));
+                std::vector<uint8_t> comp(clen);
+                if (mz_compress2(comp.data(), &clen, tmp.data(), mz_ulong(n), 4) == MZ_OK && clen < n) {
+                    PutT<int32_t>(out, int32_t(clen));
+                    Put(out, comp.data(), clen);
+                    return;
+                }
+            }
+            PutT<int32_t>(out, int32_t(raw.size()));  // stored uncompressed
+            Put(out, raw.data(), raw.size());
+        });
+        for (int k = 0; k < count && ok; ++k) {
+            offsets[size_t(first + k)] = uint64_t(pos);
+            ok = std::fwrite(encoded[size_t(k)].data(), 1, encoded[size_t(k)].size(), f) == encoded[size_t(k)].size();
+            pos += int64_t(encoded[size_t(k)].size());
+        }
+    }
+    ok = ok && _fseeki64(f, tablePos, SEEK_SET) == 0 && std::fwrite(offsets.data(), 8, offsets.size(), f) == offsets.size();
+    ok = std::fclose(f) == 0 && ok;
+    if (!ok) *err = "write failed: " + path;
+    return ok;
+}
+
+bool WriteEXR(const std::string &path, const Image &img, bool half, std::string *err) {
+    return WriteEXRRows(path, img.Width(), img.Height(),
+                        [&](int y, float *rgb) {
+                            std::memcpy(rgb, img.Data().data() + size_t(y) * img.Width() * 3, sizeof(float) * img.Width() * 3);
+                        },
+                        half, true, err);
+}
+
+bool WritePFMRows(const std::string &path, int w, int h, const RowFn &rows, std::string *err) {
+    FILE *f = _wfopen(Utf8Path(path).wstring().c_str(), L"wb");
+    if (!f) {
+        *err = "cannot open " + path + " for writing";
+        return false;
+    }
+    std::fprintf(f, "PF\n%d %d\n-1.0\n", w, h);
+    std::vector<float> row(size_t(w) * 3);
+    bool ok = true;
+    for (int y = h - 1; y >= 0 && ok; --y) {  // PFM stores the bottom row first
+        rows(y, row.data());
+        ok = std::fwrite(row.data(), sizeof(float), row.size(), f) == row.size();
+    }
+    ok = std::fclose(f) == 0 && ok;
     if (!ok) *err = "write failed: " + path;
     return ok;
 }
 
 bool WritePFM(const std::string &path, const Image &img, std::string *err) {
-    FILE *f = _wfopen(Utf8Path(path).wstring().c_str(), L"wb");
-    if (!f) {
-        *err = "cannot open " + path + " for writing";
-        return false;
-    }
-    std::fprintf(f, "PF\n%d %d\n-1.0\n", img.Width(), img.Height());
-    for (int y = img.Height() - 1; y >= 0; --y)
-        for (int x = 0; x < img.Width(); ++x) {
-            RGB c = img.Get(x, y);
-            std::fwrite(&c.r, 4, 1, f);
-            std::fwrite(&c.g, 4, 1, f);
-            std::fwrite(&c.b, 4, 1, f);
-        }
-    std::fclose(f);
-    return true;
+    return WritePFMRows(path, img.Width(), img.Height(),
+                        [&](int y, float *rgb) {
+                            std::memcpy(rgb, img.Data().data() + size_t(y) * img.Width() * 3, sizeof(float) * img.Width() * 3);
+                        },
+                        err);
 }
 
-bool WriteLDR(const std::string &path, const Image &display, std::string *err) {
-    const int w = display.Width(), h = display.Height();
-    std::vector<uint8_t> px(size_t(w) * h * 3);
-    for (int y = 0; y < h; ++y)
-        for (int x = 0; x < w; ++x) {
-            RGB c = display.Get(x, y);
-            for (int k = 0; k < 3; ++k)
-                px[3 * (size_t(y) * w + x) + k] = uint8_t(Clamp(int(c[k] * 255.f + 0.5f), 0, 255));
-        }
+bool WriteLDRBytes(const std::string &path, int w, int h, const uint8_t *rgb, std::string *err) {
     std::string ext = Extension(path);
     int ok = 0;
-    if (ext == ".png") ok = stbi_write_png(path.c_str(), w, h, 3, px.data(), w * 3);
-    else if (ext == ".jpg" || ext == ".jpeg") ok = stbi_write_jpg(path.c_str(), w, h, 3, px.data(), 95);
-    else if (ext == ".bmp") ok = stbi_write_bmp(path.c_str(), w, h, 3, px.data());
-    else if (ext == ".tga") ok = stbi_write_tga(path.c_str(), w, h, 3, px.data());
+    // stb's zlib is single-threaded; trade a little size for speed on very large images.
+    stbi_write_png_compression_level = int64_t(w) * h > 32'000'000 ? 2 : 8;
+    if (ext == ".png") ok = stbi_write_png(path.c_str(), w, h, 3, rgb, w * 3);
+    else if (ext == ".jpg" || ext == ".jpeg") ok = stbi_write_jpg(path.c_str(), w, h, 3, rgb, 95);
+    else if (ext == ".bmp") ok = stbi_write_bmp(path.c_str(), w, h, 3, rgb);
+    else if (ext == ".tga") ok = stbi_write_tga(path.c_str(), w, h, 3, rgb);
     else {
         *err = "unsupported LDR format: " + ext;
         return false;
     }
     if (!ok) *err = "failed to write " + path;
     return ok != 0;
+}
+
+bool WriteLDR(const std::string &path, const Image &display, std::string *err) {
+    const int w = display.Width(), h = display.Height();
+    std::vector<uint8_t> px(size_t(w) * h * 3);
+    for (size_t i = 0; i < px.size(); ++i) px[i] = uint8_t(Clamp(int(display.Data()[i] * 255.f + 0.5f), 0, 255));
+    return WriteLDRBytes(path, w, h, px.data(), err);
 }
 
 } // namespace pr
