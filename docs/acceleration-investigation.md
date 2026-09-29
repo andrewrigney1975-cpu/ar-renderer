@@ -168,3 +168,49 @@ Agreement was also checked on a 4×4 tile grid: every tile was within ±0.8%, wh
    - Hardware ray tracing via Embree 4 SYCL (mesh-heavy scenes).
    - A compressed, wider BVH.
 3. The scene export shows exactly what the data-oriented refactor (1d) must cover. Coats, sheen, subsurface and media are the missing pieces for feature parity with the path tracer. MLT/BDPT on the GPU remain later work (§4).
+
+### GPU path tracer: feature parity
+
+Follow-up work brought the GPU path tracer to parity with the CPU path tracer for everything in the sample scene:
+
+- **Homogeneous media**, as in `PathIntegrator`:
+  - Per-surface inside/outside media, interface surfaces and the camera medium.
+  - One-sample spectral-MIS distance sampling and Henyey–Greenstein scattering.
+  - Shadow rays accumulate transmittance through interfaces.
+  - This also brings **subsurface** materials (a dielectric boundary around a homogeneous interior), absorbing water and the fog rig.
+- **Coats:** `coated_diffuse` and `coated_conductor`, a port of the stochastic `LayeredBxDF` random walk.
+- **Sheen** over any base, using the CPU's own albedo table.
+- **Pixel filters:** filter importance sampling from a tabulated CDF, weighted by the exact filter over its pdf, so Gaussian and Blackman–Harris match the CPU.
+- **Checkpoint/resume:**
+  - The checkpoint stores the film plus the number of samples per pixel.
+  - A resumed render agrees with an uninterrupted one to float rounding, about 1e-4.
+  - GPU and CPU checkpoints are marked in the header and refused across devices.
+- **Fallbacks:** orthographic and realistic-lens cameras, or a missing GPU module, fall back to the CPU path tracer with a warning.
+- **UI:** a *Device* selector, populated from `prender --list-devices`, locks the integrator to the path tracer while a GPU is selected. The UI build ships the GPU module and oneAPI runtime DLLs next to the app.
+
+Still CPU-only:
+- Heterogeneous media, image textures (averaged), normal/bump maps.
+- Spot, IES, distant and sun lights, and image environments.
+- BDPT and MLT.
+
+**Validation:**
+- GPU against the CPU path tracer, confirmed with CPU BDPT as an independent reference.
+- Every material type was checked on isolated spheres and all agree within 0.15%. On the whole sample scene, the mean differs by ≤ 0.13% and every 4×4 tile is within CPU seed-to-seed noise.
+
+**Performance** (960×540, time per sample per pixel, startup excluded):
+
+| Scene | CPU, 24 threads | Arc A770 | Speed-up |
+|---|---|---|---|
+| Sample scene, all materials (coats, sheen, SSS, glass, metals) | 89 ms | 31 ms | 2.9× |
+| Sample scene + fog rig | 130 ms | 62 ms | 2.1× |
+| Same scene without coats/sheen (SSS, glass, metals) | 91 ms | 14 ms | 6.6× |
+
+At 1080p on scenes without coats or sheen, the earlier 12–16× figures still hold.
+
+**Lessons:**
+
+- **The kernel is compiled in two variants.** Scenes with coats or sheen get the full BSDF, and all others get a lean one.
+  - The layered random walk triples register pressure, and in a megakernel every path pays for it, not just the ones that hit a coated surface.
+  - The two variants must be in separate device images (`-fsycl-device-code-split=per_kernel`). In one image, IGC's retry compilation of the big kernel also slowed the lean one by 2.4×.
+- **Do not mark device functions `noinline`.** With oneAPI 2025.1, stack calls for the layered BSDF gave sheen-over-coat results 8% too dark. Inlined, they match exactly. The per-material GPU/CPU comparison caught it.
+- **Wavefront scheduling is the next step for performance.** Sorting hits by material would let coated surfaces run in their own kernel without slowing everything else. It would also help divergent glass and subsurface paths.

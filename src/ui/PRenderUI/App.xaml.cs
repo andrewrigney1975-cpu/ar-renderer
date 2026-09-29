@@ -31,8 +31,8 @@ public partial class App : Application
             var window = new MainWindow();
             _window = window;
             _window.Activate();
-            // Developer aids: --autorender starts a render on launch; --screenshot out.png [--screenshot-delay s]
-            // renders the UI to an image and exits.
+            // Developer aids: --autorender starts a render on launch (--device <id> picks the device);
+            // --screenshot out.png [--screenshot-delay s] renders the UI to an image and exits.
             string[] argv = Environment.GetCommandLineArgs();
             if (argv.Contains("--autorender")) window.StartRenderFromCommandLine();
             int i = Array.IndexOf(argv, "--screenshot");

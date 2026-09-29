@@ -53,10 +53,11 @@ if not exist "%ROOT%build\gpu" mkdir "%ROOT%build\gpu"
 if not exist "%ROOT%build\bin" mkdir "%ROOT%build\bin"
 rem Ahead-of-time code for Arc (DG2, override with GPU_AOT_DEVICE) with the large register file
 rem (the megakernel spills otherwise: ~1.4-1.8x slower), plus generic SPIR-V JIT-compiled for
-rem any other GPU.
+rem any other GPU. Each kernel variant gets its own device image so the large coated/sheen kernel
+rem cannot drag the lean one into IGC's slower retry compilation.
 if not defined GPU_AOT_DEVICE set "GPU_AOT_DEVICE=dg2"
 set "PATH=%ONEAPI_ROOT%\ocloc\latest\bin;%PATH%"
-icx-cl -fsycl -fsycl-targets=spir64_gen,spir64 ^
+icx-cl -fsycl -fsycl-targets=spir64_gen,spir64 -fsycl-device-code-split=per_kernel ^
   -Xsycl-target-backend=spir64_gen "-device %GPU_AOT_DEVICE% -options -ze-opt-large-register-file" ^
   /O2 /EHsc /std:c++17 /MD /W3 /LD /I "%ROOT%src" "%ROOT%src\gpu\prender_gpu.cpp" ^
   /Fo"%ROOT%build\gpu\prender_gpu.obj" /Fe"%ROOT%build\bin\prender_gpu.dll" || exit /b 1

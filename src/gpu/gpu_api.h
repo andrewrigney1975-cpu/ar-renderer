@@ -14,11 +14,15 @@
 
 namespace prgpu {
 
-constexpr int kApiVersion = 1;
+constexpr int kApiVersion = 3;
 
 // Spectra are tabulated at 5 nm from 360 to 830 nm (95 samples) and interpolated linearly.
 constexpr int kSpectrumSamples = 95;
 constexpr float kSpectrumMin = 360.f, kSpectrumStep = 5.f;
+// Pixel filter importance sampling: piecewise-constant 1D CDF over [-radius, radius].
+constexpr int kFilterBins = 64;
+// Sheen directional albedo table (pr::SheenBxDF::Albedo), alpha-major.
+constexpr int kSheenMu = 32, kSheenAlpha = 16;
 
 struct Float3 {
     float x, y, z;
@@ -41,6 +45,7 @@ struct Primitive {
     uint32_t type;
     int32_t material;   // index into materials
     int32_t light;      // index into lights (area emitters) or -1
+    int32_t mediumInside, mediumOutside;  // media on either side of the surface (-1 = vacuum)
     uint32_t pad;
     // Triangle: p0, p1, p2 and normals (n0 == 0 -> flat); sphere: p0 = centre, radius in r.
     Float3 p0, p1, p2;
@@ -50,7 +55,8 @@ struct Primitive {
     uint32_t flip;
 };
 
-enum MaterialType : uint32_t { MatDiffuse = 0, MatConductor = 1, MatDielectric = 2, MatBlack = 3 };
+enum MaterialType : uint32_t { MatDiffuse = 0, MatConductor = 1, MatDielectric = 2, MatBlack = 3, MatInterface = 4,
+                                 MatCoatedDiffuse = 5, MatCoatedConductor = 6 };
 
 struct Material {
     uint32_t type;
@@ -61,7 +67,31 @@ struct Material {
     float alphaX, alphaY;   // GGX alpha (roughness^2); < 1e-3 = smooth
     uint32_t dispersive;    // dielectric IOR varies with wavelength
     uint32_t thin;
-    uint32_t pad[2];
+    // Coat (coated_diffuse / coated_conductor): a dielectric layer over the base, with an
+    // optional scattering medium in between (pr::LayeredBxDF).
+    int32_t coatEta;        // spectrum index
+    float coatAlpha, thickness, coatG;
+    int32_t coatAlbedo;     // spectrum index, -1 = clear
+    uint32_t coatDispersive;
+    int32_t coatMaxDepth, coatSamples;
+    // Sheen lobe over any base (pr::SheenBxDF); sheenWeight 0 = none.
+    int32_t sheenColor;
+    float sheenRoughness, sheenWeight;
+    uint32_t pad;
+};
+
+// Homogeneous medium: sigma_a, sigma_s spectra (indices) times scale, Henyey-Greenstein g.
+struct Medium {
+    int32_t sigmaA, sigmaS;
+    float scale, g;
+};
+
+enum FilterType : uint32_t { FilterBox = 0, FilterGaussian = 1, FilterBlackmanHarris = 2 };
+
+struct Filter {
+    uint32_t type;
+    float radius, sigma, norm;  // norm: 2D normalization, as in pr::Filter
+    float cdf[kFilterBins + 1];
 };
 
 enum LightType : uint32_t { LightArea = 0, LightPoint = 1 };
@@ -100,12 +130,17 @@ struct SceneDesc {
     int32_t lightCount;
     const Spectrum *spectra;
     int32_t spectrumCount;
+    const Medium *media;
+    int32_t mediumCount;
+    int32_t cameraMedium;       // medium the camera sits in, -1 none
     int32_t envSpectrum;        // constant environment radiance, -1 none
     float envScale;
     float envPmf;               // selection probability of the environment in NEE
     Float3 worldCenter;
     float worldRadius;
     Camera camera;
+    Filter filter;
+    const float *sheenAlbedo;   // kSheenAlpha * kSheenMu
     const float *cie;           // 3 x kSpectrumSamples colour matching functions (x, y, z)
     float cieYIntegral;
 };

@@ -416,7 +416,9 @@ Built and verified: renderer, tests (`build.cmd test`: 30 cases passing), WinUI 
 **Progress (branch `feature/acceleration`):**
 - CPU quick wins: dense-scene load 1.0 s → 0.18 s.
 - GPU trial: a SYCL megakernel path tracer in `prender_gpu.dll`, selected with `--device gpu`. On the A770 it runs **12–16× faster** than the 24-thread CPU path tracer, with mean-image agreement within 0.06%.
-- Device selection (item 3) is done in the CLI and the scene file; the UI selector is still to do.
+- GPU feature parity with the CPU path tracer: media, subsurface, coats, sheen, pixel filters and checkpoint/resume. Validated per material against the CPU (within 0.15%). Speed-up is 2–3× on scenes with coats/sheen (megakernel register pressure) and 6–16× without.
+- Device selection (item 3) is done in the CLI, the scene file and the UI's *Device* selector.
+- Next: wavefront scheduling (sorting by material), then Embree 4 SYCL hardware ray tracing.
 
 See §7 of the investigation.
 

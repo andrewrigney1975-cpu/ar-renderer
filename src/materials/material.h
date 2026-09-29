@@ -57,6 +57,7 @@ class Material {
     void SetNormalMap(NormalMapParams n) { normalMap_ = std::move(n); }
     void SetBumpMap(BumpMapParams b) { bumpMap_ = std::move(b); }
     bool HasSheen() const { return sheen_.weight > 0; }
+    const SheenParams &Sheen() const { return sheen_; }
     bool HasShadingPerturbation() const { return normalMap_.image || bumpMap_.height; }
     std::string name;
 
@@ -139,6 +140,7 @@ class CoatedDiffuseMaterial : public Material {
     CoatedDiffuseMaterial(CoatParams coat, SpectrumTexturePtr reflectance)
         : coat_(std::move(coat)), reflectance_(std::move(reflectance)) {}
     const SpectrumTexturePtr &Reflectance() const { return reflectance_; }
+    const CoatParams &Coat() const { return coat_; }
 
   protected:
     const BxDF *GetBxDF(const MaterialEvalContext &ctx, SampledWavelengths &lambda, ScratchBuffer &buf) const override;
@@ -153,6 +155,7 @@ class CoatedConductorMaterial : public Material {
     CoatedConductorMaterial(CoatParams coat, ConductorParams conductor)
         : coat_(std::move(coat)), conductor_(std::move(conductor)) {}
     const ConductorParams &Conductor() const { return conductor_; }
+    const CoatParams &Coat() const { return coat_; }
 
   protected:
     const BxDF *GetBxDF(const MaterialEvalContext &ctx, SampledWavelengths &lambda, ScratchBuffer &buf) const override;

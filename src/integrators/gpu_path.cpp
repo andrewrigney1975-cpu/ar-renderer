@@ -1,11 +1,14 @@
 #include "integrators/gpu_path.h"
+#include "integrators/path.h"
 
 #include "cameras/camera.h"
 #include "core/log.h"
 #include "core/parallel.h"
 #include "core/rgb2spec.h"
 #include "gpu/gpu_api.h"
+#include "materials/bxdf.h"
 #include "materials/material.h"
+#include "media/medium.h"
 
 #include <map>
 #include <mutex>
@@ -108,7 +111,39 @@ class Exporter {
     std::vector<prgpu::Material> materials;
     std::vector<prgpu::Primitive> prims;
     std::vector<prgpu::Light> lights;
+    std::vector<prgpu::Medium> media;
     std::set<std::string> warnings;
+
+    // Homogeneous media map directly; other media are not supported on the GPU yet.
+    int MediumIndex(const pr::Medium *md) {
+        if (!md) return -1;
+        auto it = mediumCache_.find(md);
+        if (it != mediumCache_.end()) return it->second;
+        int id = -1;
+        if (auto *h = dynamic_cast<const HomogeneousMedium *>(md)) {
+            prgpu::Medium g{};
+            g.sigmaA = Spec(h->SigmaAPtr());
+            g.sigmaS = Spec(h->SigmaSPtr());
+            g.scale = h->Scale();
+            g.g = h->G();
+            media.push_back(g);
+            id = int(media.size() - 1);
+        } else {
+            warnings.insert("heterogeneous media are ignored on the GPU");
+        }
+        mediumCache_[md] = id;
+        return id;
+    }
+    int InterfaceMat() {
+        if (interfaceMat_ < 0) {
+            prgpu::Material m{};
+            m.albedo = m.albedoB = m.eta = m.k = -1;
+            m.type = prgpu::MatInterface;
+            materials.push_back(m);
+            interfaceMat_ = int(materials.size() - 1);
+        }
+        return interfaceMat_;
+    }
 
     int Spec(const Spectrum &s) {
         prgpu::Spectrum t;
@@ -161,11 +196,27 @@ class Exporter {
             m->albedo = SpecTex(p.reflectance, &m->albedoB, &m->checkerScale);
         }
     }
+    void Coat(const CoatParams &c, prgpu::Material *m) {
+        m->coatEta = Spec(c.eta);
+        m->coatDispersive = c.eta->IsConstant() ? 0 : 1;
+        m->coatAlpha = TrowbridgeReitzDistribution::RoughnessToAlpha(FloatTex(c.roughness, 0.f));
+        m->thickness = FloatTex(c.thickness, 0.01f);
+        m->coatAlbedo = -1;
+        if (c.albedo) {
+            int d;
+            float sc;
+            m->coatAlbedo = SpecTex(c.albedo, &d, &sc);
+        }
+        m->coatG = c.g;
+        m->coatMaxDepth = c.maxDepth;
+        m->coatSamples = c.nSamples;
+    }
     int Mat(const Material *mat) {
         auto it = matCache_.find(mat);
         if (it != matCache_.end()) return it->second;
         prgpu::Material m{};
         m.albedo = m.albedoB = m.eta = m.k = -1;
+        m.coatEta = m.coatAlbedo = m.sheenColor = -1;
         if (!mat) {
             m.type = prgpu::MatBlack;
         } else if (auto *d = dynamic_cast<const DiffuseMaterial *>(mat)) {
@@ -182,18 +233,26 @@ class Exporter {
             m.alphaX = TrowbridgeReitzDistribution::RoughnessToAlpha(ur);
             m.alphaY = TrowbridgeReitzDistribution::RoughnessToAlpha(vr);
         } else if (auto *cd = dynamic_cast<const CoatedDiffuseMaterial *>(mat)) {
-            warnings.insert("coated_diffuse is rendered as diffuse on the GPU");
-            m.type = prgpu::MatDiffuse;
             m.albedo = SpecTex(cd->Reflectance(), &m.albedoB, &m.checkerScale);
+            Coat(cd->Coat(), &m);
+            m.type = prgpu::MatCoatedDiffuse;
         } else if (auto *cc = dynamic_cast<const CoatedConductorMaterial *>(mat)) {
-            warnings.insert("coated_conductor is rendered without its coat on the GPU");
             Conductor(cc->Conductor(), &m);
+            Coat(cc->Coat(), &m);
+            m.type = prgpu::MatCoatedConductor;
         } else {
             warnings.insert("unsupported material rendered as grey diffuse");
             m.type = prgpu::MatDiffuse;
             m.albedo = Spec(ConstantSpectrum(0.5f));
         }
-        if (mat && mat->HasSheen()) warnings.insert("sheen is ignored on the GPU");
+        if (mat && mat->HasSheen() && mat->Sheen().color) {
+            int d;
+            float sc;
+            m.sheenColor = SpecTex(mat->Sheen().color, &d, &sc);
+            if (d >= 0) warnings.insert("checker sheen colours use their first colour on the GPU");
+            m.sheenRoughness = FloatTex(mat->Sheen().roughness, 0.3f);
+            m.sheenWeight = mat->Sheen().weight;
+        }
         if (mat && mat->HasShadingPerturbation()) warnings.insert("normal/bump maps are ignored on the GPU");
         materials.push_back(m);
         int id = int(materials.size() - 1);
@@ -204,6 +263,8 @@ class Exporter {
   private:
     std::map<const Spectrum *, int> cache_;
     std::map<const Material *, int> matCache_;
+    std::map<const pr::Medium *, int> mediumCache_;
+    int interfaceMat_ = -1;
 };
 
 prgpu::Float3 F3(const Vec3f &v) { return {v.x, v.y, v.z}; }
@@ -212,18 +273,14 @@ prgpu::Float3 F3(const Vec3f &v) { return {v.x, v.y, v.z}; }
 
 bool GpuPathIntegrator::Render(const Scene &scene, Film &film, RenderControl &control, double *scale, std::string *err) {
     GpuModule &mod = Module();
-    if (!mod.loaded) {
-        *err = "GPU rendering unavailable: " + mod.status;
-        return false;
-    }
     auto *camera = dynamic_cast<const PerspectiveCamera *>(scene.camera.get());
-    if (!camera) {
-        *err = "the GPU path tracer supports perspective/thin-lens cameras only";
-        return false;
+    if (!mod.loaded || !camera) {
+        LogWarning("{}; rendering on the CPU", !mod.loaded ? "GPU rendering unavailable: " + mod.status
+                                                           : std::string("the GPU supports perspective/thin-lens cameras only"));
+        IntegratorSettings cpu = settings_;
+        cpu.device = -1;
+        return PathIntegrator(cpu, seed_).Render(scene, film, control, scale, err);
     }
-    if (!control.resumePath.empty() || !control.checkpointPath.empty())
-        LogWarning("checkpointing is not supported by the GPU trial integrator; ignored");
-
     Exporter ex;
     // Primitives
     std::map<const Light *, int> lightOfPrim;
@@ -231,20 +288,13 @@ bool GpuPathIntegrator::Render(const Scene &scene, Film &film, RenderControl &co
         const Primitive &p = scene.primitives[i];
         prgpu::Primitive g{};
         g.light = -1;
-        if (p.mediumInterface.inside || p.mediumInterface.outside) ex.warnings.insert("participating media are ignored on the GPU");
-        if (p.IsInterface()) {
-            // Invisible medium boundary: treat as non-existent by making it a pass-through black
-            // surface would be wrong; instead skip intersection via an out-of-reach sphere.
-            g.type = prgpu::PrimSphere;
-            g.p0 = {0, 0, 0};
-            g.r = -1;  // never intersects (kernel skips r <= 0)
-            g.material = ex.Mat(nullptr);
-        } else if (auto *sp = dynamic_cast<const Sphere *>(p.shape)) {
+        g.mediumInside = ex.MediumIndex(p.mediumInterface.inside);
+        g.mediumOutside = ex.MediumIndex(p.mediumInterface.outside);
+        if (auto *sp = dynamic_cast<const Sphere *>(p.shape)) {
             g.type = prgpu::PrimSphere;
             g.p0 = F3(sp->Center());
             g.r = sp->Radius();
             g.flip = sp->Flip() ? 1 : 0;
-            g.material = ex.Mat(p.material);
         } else if (auto *tr = dynamic_cast<const Triangle *>(p.shape)) {
             const TriangleMesh &m = tr->Mesh();
             const int *vi = &m.indices[3 * tr->Index()];
@@ -264,13 +314,15 @@ bool GpuPathIntegrator::Render(const Scene &scene, Film &film, RenderControl &co
             } else {
                 g.u0 = 0; g.v0 = 0; g.u1 = 1; g.v1 = 0; g.u2 = 1; g.v2 = 1;
             }
-            g.material = ex.Mat(p.material);
         } else {
             *err = "unsupported shape for the GPU";
             return false;
         }
+        // Interfaces are invisible medium boundaries: the kernel only switches media there.
+        g.material = p.IsInterface() ? ex.InterfaceMat() : ex.Mat(p.material);
         ex.prims.push_back(g);
     }
+    const int cameraMedium = ex.MediumIndex(scene.camera->medium);
     // Lights (power-based selection, renormalized over the supported ones)
     float envPmf = 0, pmfSum = 0;
     int envSpectrum = -1;
@@ -350,6 +402,9 @@ bool GpuPathIntegrator::Render(const Scene &scene, Film &film, RenderControl &co
     sd.lightCount = int(ex.lights.size());
     sd.spectra = ex.spectra.data();
     sd.spectrumCount = int(ex.spectra.size());
+    sd.media = ex.media.data();
+    sd.mediumCount = int(ex.media.size());
+    sd.cameraMedium = cameraMedium;
     sd.envSpectrum = envSpectrum;
     sd.envScale = envScale;
     sd.envPmf = envPmf;
@@ -366,9 +421,39 @@ bool GpuPathIntegrator::Render(const Scene &scene, Film &film, RenderControl &co
     sd.camera.height = film.Height();
     sd.camera.margin = 0;
     sd.cieYIntegral = CIE_Y_Integral();
+    std::vector<float> sheenTable(size_t(prgpu::kSheenAlpha) * prgpu::kSheenMu);
+    for (int ia = 0; ia < prgpu::kSheenAlpha; ++ia)
+        for (int im = 0; im < prgpu::kSheenMu; ++im)
+            sheenTable[size_t(ia) * prgpu::kSheenMu + im] = SheenBxDF::Albedo(
+                float(im) / (prgpu::kSheenMu - 1), 0.05f + 0.95f * float(ia) / (prgpu::kSheenAlpha - 1));
+    sd.sheenAlbedo = sheenTable.data();
 
-    if (film.Settings().filter.type != FilterType::Box)
-        LogWarning("GPU: the trial integrator uses a box pixel filter");
+    // Pixel filter: the kernel importance-samples a tabulated 1D CDF and weights by filter / pdf.
+    const Filter &filter = film.GetFilter();
+    sd.filter.type = filter.Type() == FilterType::Gaussian        ? prgpu::FilterGaussian
+                     : filter.Type() == FilterType::BlackmanHarris ? prgpu::FilterBlackmanHarris
+                                                                   : prgpu::FilterBox;
+    sd.filter.radius = filter.Radius();
+    sd.filter.sigma = filter.Sigma();
+    sd.filter.norm = filter.Norm();
+    {
+        double sum = 0, peak = 0, bins[prgpu::kFilterBins];
+        for (int i = 0; i < prgpu::kFilterBins; ++i) {
+            float x = -filter.Radius() + (i + 0.5f) * (2 * filter.Radius() / prgpu::kFilterBins);
+            bins[i] = std::abs(filter.Eval1D(x));
+            peak = std::max(peak, bins[i]);
+        }
+        // A floor keeps the density positive wherever the filter is.
+        for (double &b : bins) b += 1e-3 * peak;
+        for (double b : bins) sum += b;
+        double acc = 0;
+        sd.filter.cdf[0] = 0;
+        for (int i = 0; i < prgpu::kFilterBins; ++i) {
+            acc += bins[i] / sum;
+            sd.filter.cdf[i + 1] = float(acc);
+        }
+        sd.filter.cdf[prgpu::kFilterBins] = 1;
+    }
 
     // Progressive passes: small sample batches keep progress, previews and cancel responsive.
     const int w = film.Width(), h = film.Height();
@@ -376,6 +461,18 @@ bool GpuPathIntegrator::Render(const Scene &scene, Film &film, RenderControl &co
     const int targetSpp = settings_.timeLimit > 0 ? std::numeric_limits<int>::max() : std::max(1, settings_.spp);
     int done = 0, batch = 1;
     char msg[1024] = {0};
+    // Checkpoints: the film plus the number of samples per pixel. Sample streams are indexed by
+    // sample number, so a resumed render continues exactly where the checkpoint stopped.
+    if (!control.resumePath.empty()) {
+        int32_t passes = 0;
+        if (!ReadCheckpoint(control, settings_, film, [&](BinaryReader &r) { return r.Get(&passes); }, err)) return false;
+        done = passes;
+        LogInfo("resumed at {} samples per pixel", done);
+    }
+    auto checkpoint = [&] {
+        std::string e;
+        if (!WriteCheckpoint(control, settings_, film, [&](BinaryWriter &w) { w.Put(int32_t(done)); }, &e)) LogWarning("{}", e);
+    };
     while (done < targetSpp && !control.cancel) {
         int n = std::min(batch, targetSpp - done);
         std::fill(xyz.begin(), xyz.end(), 0.f);
@@ -407,8 +504,10 @@ bool GpuPathIntegrator::Render(const Scene &scene, Film &film, RenderControl &co
         pi.fraction = settings_.timeLimit > 0 ? std::min(1.0, elapsed / settings_.timeLimit) : double(done) / targetSpp;
         control.Progress(pi, done == targetSpp);
         control.MaybePreview(film, 1.0 / done);
+        if (control.CheckpointDue()) checkpoint();
         if (settings_.timeLimit > 0 && elapsed >= settings_.timeLimit) break;
     }
+    checkpoint();
     *scale = done > 0 ? 1.0 / done : 0.0;
     return true;
 }
