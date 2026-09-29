@@ -56,6 +56,7 @@ add_library(pr_core STATIC
   src/scene/import_pbrt.cpp
   src/integrators/integrator.cpp
   src/integrators/aov.cpp
+  src/integrators/gpu_path.cpp
   src/integrators/path.cpp
   src/integrators/bdpt.cpp
   src/integrators/mlt.cpp

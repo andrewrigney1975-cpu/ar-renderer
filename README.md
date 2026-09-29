@@ -59,6 +59,7 @@ build.cmd            :: renderer (CMake + Ninja, Release) and the WinUI 3 app
 build.cmd renderer   :: renderer only  -> build\bin\prender.exe
 build.cmd test       :: renderer + unit/integration tests
 build.cmd ui         :: WinUI 3 app only (PRender.sln)
+build.cmd gpu        :: optional GPU module (Intel oneAPI DPC++) -> build\bin\prender_gpu.dll
 ```
 
 The first run fits and caches the RGB-to-spectrum table (`prender_rgb2spec_srgb_v1.bin`), which takes about a second.

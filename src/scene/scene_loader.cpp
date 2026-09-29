@@ -1205,6 +1205,13 @@ void Loader::ParseRender() {
             if (fl.is_object() && fl.contains("radius")) rs.film.filter.radius = fl["radius"].get<float>();
         }
     }
+    if (r.contains("device")) {
+        std::string d = GetString(r, "device", "cpu");
+        if (d == "cpu") rs.integrator.device = -1;
+        else if (d == "gpu") rs.integrator.device = 0;
+        else if (d.rfind("gpu:", 0) == 0) rs.integrator.device = std::atoi(d.c_str() + 4);
+        else Fail("render.device must be 'cpu', 'gpu' or 'gpu:N'");
+    }
     if (opts_.width > 0) rs.film.width = opts_.width;
     if (opts_.height > 0) rs.film.height = opts_.height;
     if (r.contains("integrator")) {

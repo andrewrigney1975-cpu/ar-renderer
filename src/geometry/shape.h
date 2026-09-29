@@ -63,6 +63,7 @@ class Sphere : public Shape {
     bool Contains(const Vec3f &p) const override { return DistanceSquared(p, c_) < r_ * r_; }
     const Vec3f &Center() const { return c_; }
     float Radius() const { return r_; }
+    bool Flip() const { return flip_; }
 
   private:
     Vec3f c_;

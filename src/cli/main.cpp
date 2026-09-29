@@ -7,6 +7,7 @@
 #include "core/parallel.h"
 #include "core/rgb2spec.h"
 #include "integrators/aov.h"
+#include "integrators/gpu_path.h"
 #include "integrators/integrator.h"
 #include "scene/scene_loader.h"
 
@@ -60,6 +61,8 @@ struct Args {
     bool controlStdin = false;
     bool validate = false;
     std::string convert;
+    std::optional<std::string> device;
+    bool listDevices = false;
     std::string checkpoint, resume;
     double checkpointInterval = 60;
     bool verbose = false;
@@ -94,6 +97,8 @@ void PrintUsage() {
         "  --checkpoint <file>        save resumable state periodically, on cancel and at the end\n"
         "  --checkpoint-interval <d>  checkpoint period (default 60s)\n"
         "  --resume <file>            continue a checkpointed render (raise --spp/--mutations or --time)\n"
+        "  --device cpu|gpu|gpu:N     render device (GPU: path tracer, oneAPI/SYCL)\n"
+        "  --list-devices             list render devices and exit\n"
         "  --convert <out.json>       write the scene (incl. glTF/pbrt imports) as native JSON and exit\n"
         "  --validate                 load and validate the scene, then exit\n"
         "  --verbose | --quiet\n"
@@ -248,6 +253,11 @@ bool ParseArgs(int argc, char **argv, Args *a, std::string *err) {
         } else if (s == "--resume") {
             if (!(v = need(i))) return false;
             a->resume = v;
+        } else if (s == "--device") {
+            if (!(v = need(i))) return false;
+            a->device = v;
+        } else if (s == "--list-devices") {
+            a->listDevices = true;
         } else if (s == "--convert") {
             if (!(v = need(i))) return false;
             a->convert = v;
@@ -267,7 +277,7 @@ bool ParseArgs(int argc, char **argv, Args *a, std::string *err) {
             return false;
         }
     }
-    if (a->scene.empty()) {
+    if (a->scene.empty() && !a->listDevices) {
         *err = "no scene file given";
         return false;
     }
@@ -394,6 +404,22 @@ int main(int argc, char **argv) {
         }).detach();
     }
 
+    if (args.listDevices) {
+        std::string status;
+        auto devices = ListRenderDevices(&status);
+        json list = json::array();
+        for (const auto &d : devices) {
+            std::string id = d.index < 0 ? "cpu" : "gpu:" + std::to_string(d.index);
+            list.push_back({{"id", id}, {"name", d.name}, {"backend", d.backend}, {"memory_mb", double(d.memory) / 1048576.0},
+                            {"compute_units", d.computeUnits}, {"gpu", d.isGpu}});
+            if (gProgressMode != ProgressMode::Json)
+                std::printf("%-8s %-48s %-12s %8.0f MB  %d units\n", id.c_str(), d.name.c_str(), d.backend.c_str(),
+                            double(d.memory) / 1048576.0, d.computeUnits);
+        }
+        if (gProgressMode == ProgressMode::Json) WriteStdoutLine(json{{"event", "devices"}, {"devices", list}, {"gpu_status", status}}.dump());
+        else if (status != "ok") std::printf("GPU: %s\n", status.c_str());
+        return ExitOK;
+    }
     if (!args.convert.empty()) {
         if (!ConvertSceneToJson(args.scene, args.convert, &err)) {
             EmitError(err);
@@ -421,6 +447,16 @@ int main(int argc, char **argv) {
         else if (t == "pssmlt") rs.integrator.type = IntegratorType::PSSMLT;
         else {
             EmitError("unknown integrator: " + t);
+            return ExitSceneError;
+        }
+    }
+    if (args.device) {
+        const std::string &d = *args.device;
+        if (d == "cpu") rs.integrator.device = -1;
+        else if (d == "gpu") rs.integrator.device = 0;
+        else if (d.rfind("gpu:", 0) == 0) rs.integrator.device = std::atoi(d.c_str() + 4);
+        else {
+            EmitError("bad --device (cpu, gpu or gpu:N): " + d);
             return ExitSceneError;
         }
     }

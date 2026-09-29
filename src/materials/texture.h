@@ -36,6 +36,7 @@ class ConstantFloatTexture : public FloatTexture {
   public:
     explicit ConstantFloatTexture(float v) : v_(v) {}
     float Evaluate(const TextureEvalContext &) const override { return v_; }
+    float Value() const { return v_; }
 
   private:
     float v_;
@@ -49,6 +50,7 @@ class ConstantSpectrumTexture : public SpectrumTexture {
         return s_->Sample(lambda);
     }
     RGB AverageRGB() const override { return avg_; }
+    const SpectrumPtr &GetSpectrum() const { return s_; }
 
   private:
     SpectrumPtr s_;
@@ -131,6 +133,9 @@ class CheckerSpectrumTexture : public SpectrumTexture {
         return odd ? b_->Evaluate(ctx, lambda) : a_->Evaluate(ctx, lambda);
     }
     RGB AverageRGB() const override { return (a_->AverageRGB() + b_->AverageRGB()) * 0.5f; }
+    const SpectrumTexturePtr &A() const { return a_; }
+    const SpectrumTexturePtr &B() const { return b_; }
+    const UVMapping &Mapping() const { return map_; }
 
   private:
     SpectrumTexturePtr a_, b_;

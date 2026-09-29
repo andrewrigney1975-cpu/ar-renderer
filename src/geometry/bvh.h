@@ -28,13 +28,16 @@ class BVH {
     // Index into the original (pre-build) shape list.
     int OriginalIndex(int i) const { return order_[i]; }
 
-  private:
     struct Node {
         Bounds3f bounds;
         int offset = 0;        // leaf: first primitive; interior: second child
         uint16_t nPrims = 0;   // 0 => interior
         uint8_t axis = 0;
     };
+    const std::vector<Node> &Nodes() const { return nodes_; }
+    const std::vector<int> &Order() const { return order_; }
+
+  private:
     struct BuildPrim {
         Bounds3f b;
         Vec3f c;

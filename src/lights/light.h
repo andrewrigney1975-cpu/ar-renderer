@@ -104,6 +104,10 @@ class DiffuseAreaLight : public Light {
     std::optional<LightLeSample> SampleLe(Vec2f u1, Vec2f u2, const SampledWavelengths &lambda) const override;
     void PDF_Le(const Ray &ray, const Vec3f &n, float *pdfPos, float *pdfDir) const override;
     const Shape *GetShape() const { return shape_; }
+    const SpectrumPtr &Emission() const { return Lemit_; }
+    float Scale() const { return scale_; }
+    bool TwoSided() const { return twoSided_; }
+    float CosPower() const { return cosPower_; }
     std::optional<LightBounds> Bounds() const override;
 
   private:
@@ -120,6 +124,9 @@ class PointLight : public Light {
   public:
     PointLight(const Vec3f &p, SpectrumPtr I, float scale) : Light(LightType::DeltaPosition), p_(p), I_(std::move(I)), scale_(scale) {}
     std::optional<LightBounds> Bounds() const override;
+    const Vec3f &Position() const { return p_; }
+    const SpectrumPtr &Intensity() const { return I_; }
+    float Scale() const { return scale_; }
     float PowerY() const override { return 4 * Pi * scale_ * SpectrumToY(*I_); }
     std::optional<LightLiSample> SampleLi(const LightSampleContext &ctx, Vec2f u,
                                           const SampledWavelengths &lambda) const override;
@@ -166,6 +173,8 @@ class EnvironmentLight : public Light {
     std::optional<LightLeSample> SampleLe(Vec2f u1, Vec2f u2, const SampledWavelengths &lambda) const override;
     void PDF_Le(const Ray &ray, const Vec3f &n, float *pdfPos, float *pdfDir) const override;
     float SceneRadius() const { return radius_; }
+    const SpectrumPtr &ConstantRadiance() const { return constant_; }
+    float Scale() const { return scale_; }
 
   private:
     SampledSpectrum Lookup(const Vec3f &wWorld, const SampledWavelengths &lambda) const;

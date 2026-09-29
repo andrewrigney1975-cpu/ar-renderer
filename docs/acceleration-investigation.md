@@ -122,3 +122,49 @@ This depends on item 2, but the interface can be designed now:
 4. **oneAPI spike** (§4), then the GPU wavefront path tracer.
 5. **Device selection** (§5), shipped together with the first GPU integrator.
 6. GPU BDPT, then MLT (hybrid first).
+
+## 7. Results: CPU quick wins and GPU trial (branch `feature/acceleration`)
+
+### CPU quick wins (1b, 1c)
+
+| Change | Result |
+|---|---|
+| Persistent thread pool (nested `ParallelFor` runs inline) | No measurable throughput change. Spawn cost was already negligible against pass length; the pool mainly tidies scheduling. |
+| Fast OBJ parser (`std::from_chars`, hashed vertex dedupe), per-load mesh cache | OBJ parse 0.19 s → 0.03 s per mesh; each file parsed once however many objects instance it |
+| Parallel BVH build (subtrees ≥ 64k primitives built with `std::async`) | 0.178 s → 0.080 s on 518k triangles |
+| **Dense scene load total** | **1.0 s → 0.18 s** |
+
+### GPU trial
+
+A deliberately small spike to measure the payoff before committing to the data-oriented refactor:
+
+- **`prender_gpu.dll`** (`src/gpu/prender_gpu.cpp`) is built with `icx -fsycl` (`build.cmd gpu`). `prender.exe` stays MSVC-built and loads it with `LoadLibrary` through a C ABI (`src/gpu/gpu_api.h`). If the DLL, its runtime or a GPU is missing, the CPU is used.
+- **Scene export** (`src/integrators/gpu_path.cpp`) flattens the loaded scene into POD buffers. Spectra are tabulated at 5 nm. The CPU BVH is reused unchanged.
+- **Kernel:** one work-item per pixel and a *megakernel*, not a wavefront. It is a spectral (4 hero wavelengths) unbiased path tracer with NEE + MIS and Russian roulette, mirroring `PathIntegrator`.
+- **Supported subset:** diffuse (incl. checker), GGX conductors (measured n/k or artist colour, anisotropic), smooth/rough/thin dielectrics with dispersion, area lights (incl. cos^n), point lights and a constant environment. Coats, sheen, subsurface, media and other lights are approximated or ignored, with a warning.
+- **Film:** float sums per pixel on the device for each progressive batch, added into the double film on the host. Box filter.
+- **Selection:** `--device cpu|gpu|gpu:N`, `render.device`, `--list-devices` (text or JSON). Non-path integrators fall back to the CPU with a warning.
+
+**Hardware:** Arc A770 16 GB (Level Zero, driver 32.0.101.9033) vs i9-12900KF, 24 threads, 1920×1080. Per-sample times exclude startup (a 1-spp run was subtracted).
+
+| Scene | CPU path tracer | GPU (AOT, large GRF) | Speed-up | GPU mean / CPU mean |
+|---|---|---|---|---|
+| Sample scene, GPU-subset materials (20 prims, glass/metal/dispersion) | 201 ms/spp | 16.5 ms/spp | **12.2×** | 0.9998 |
+| Dense scene (518k triangles, gold/glass/frosted/diffuse) | 909 ms/spp | 56 ms/spp | **16.1×** | 0.9994 |
+
+Agreement was also checked on a 4×4 tile grid: every tile was within ±0.8%, which is the noise level at these sample counts.
+
+**What mattered:**
+
+- **The large register file** (`-ze-opt-large-register-file`) gave 1.35× on the sample scene and **1.83×** on the dense one. With the default 128 GRF the megakernel spills, and IGC reports a retry compile.
+- **AOT compilation for DG2** removes the ~15 s JIT stall on the first run. A generic SPIR-V image is also embedded, so other Intel GPUs still work through JIT.
+- The one correctness bug found was in the environment shadow ray, which treated a direction as a point. It made the far floor 5–13% dark. The tile-ratio comparison against the CPU caught it immediately, so keep that check for every GPU feature.
+
+**Conclusions:**
+
+1. **Go.** A naive megakernel with a software BVH already gives 12–16× over the full 24-thread CPU at statistically identical results.
+2. Expected further gains on the GPU:
+   - Wavefront scheduling (coherence on divergent glass/metal scenes).
+   - Hardware ray tracing via Embree 4 SYCL (mesh-heavy scenes).
+   - A compressed, wider BVH.
+3. The scene export shows exactly what the data-oriented refactor (1d) must cover. Coats, sheen, subsurface and media are the missing pieces for feature parity with the path tracer. MLT/BDPT on the GPU remain later work (§4).

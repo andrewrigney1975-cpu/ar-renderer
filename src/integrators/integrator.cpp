@@ -1,10 +1,12 @@
 #include "integrators/integrator.h"
 
 #include "integrators/bdpt.h"
+#include "integrators/gpu_path.h"
 #include "integrators/mlt.h"
 #include "integrators/path.h"
 
 #include "core/fsutil.h"
+#include "core/log.h"
 
 #include <cstdio>
 #include <filesystem>
@@ -88,6 +90,13 @@ bool ReadCheckpoint(const RenderControl &control, const IntegratorSettings &s, F
 
 std::unique_ptr<Integrator> CreateIntegrator(const IntegratorSettings &settings, uint64_t seed) {
     IntegratorSettings s = settings;
+    if (s.device >= 0) {
+        if (s.type == IntegratorType::Path) {
+            if (s.maxDepth <= 0) s.maxDepth = 0;
+            return std::make_unique<GpuPathIntegrator>(s, seed, s.device);
+        }
+        LogWarning("the GPU device currently supports the path tracer only; rendering on the CPU");
+    }
     switch (s.type) {
     case IntegratorType::Path:
         // Unlimited depth: Russian roulette alone terminates paths (unbiased).

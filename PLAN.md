@@ -413,3 +413,10 @@ Built and verified: renderer, tests (`build.cmd test`: 30 cases passing), WinUI 
 
 **Investigation of items 1–3:** see [`docs/acceleration-investigation.md`](docs/acceleration-investigation.md). In summary: CPU scaling is 1.6× from 8 to 24 threads (ideal about 1.85×), and loading is serial. The recommended route is a data-oriented refactor plus Embree 4, then a oneAPI SYCL wavefront path tracer on the Arc A770 (hardware RT through Embree 4 SYCL, float film accumulation because the GPU has no fast FP64), then device selection, shipped as a runtime-loaded GPU module with CPU fallback.
 
+**Progress (branch `feature/acceleration`):**
+- CPU quick wins: dense-scene load 1.0 s → 0.18 s.
+- GPU trial: a SYCL megakernel path tracer in `prender_gpu.dll`, selected with `--device gpu`. On the A770 it runs **12–16× faster** than the 24-thread CPU path tracer, with mean-image agreement within 0.06%.
+- Device selection (item 3) is done in the CLI and the scene file; the UI selector is still to do.
+
+See §7 of the investigation.
+

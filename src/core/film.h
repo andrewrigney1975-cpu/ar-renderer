@@ -63,6 +63,13 @@ class Film {
     void AddSample(Vec2f pRaster, const SampledSpectrum &L, const SampledWavelengths &lambda,
                    float weight = 1.f);
     void AddXYZ(Vec2f pRaster, const XYZ &xyz);
+    // Adds directly to an image pixel (box-filtered estimators, e.g. the GPU path tracer).
+    void AddPixelXYZ(int x, int y, const XYZ &xyz) {
+        size_t idx = 3 * (size_t(y) * settings_.width + x);
+        xyz_[idx + 0].fetch_add(double(xyz.x), std::memory_order_relaxed);
+        xyz_[idx + 1].fetch_add(double(xyz.y), std::memory_order_relaxed);
+        xyz_[idx + 2].fetch_add(double(xyz.z), std::memory_order_relaxed);
+    }
     void Clear();
     // Checkpointing of the raw accumulators, streamed to/from a file in chunks (no full copy).
     bool WriteAccumulators(FILE *f) const;
