@@ -8,7 +8,8 @@ namespace pr {
 void MLTSampler::EnsureReady(int64_t index) {
     if (index >= int64_t(X_.size())) X_.resize(size_t(index) + 1);
     PrimarySample &Xi = X_[size_t(index)];
-    // Bring the sample up to date with the last large step, if it was not touched since.
+    // Bring the sample up to date with the last large step, if it was not touched since (a
+    // never-drawn sample, lastModificationIteration == -1, always is: see PrimarySample).
     if (Xi.lastModificationIteration < lastLargeStepIteration_) {
         Xi.value = rng_.UniformFloat();
         Xi.lastModificationIteration = lastLargeStepIteration_;

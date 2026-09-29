@@ -165,14 +165,16 @@ static int RandomWalk(BDPTContext &ctx, Ray ray, SampledSpectrum beta, float pdf
     float pdfFwd = pdf, pdfRev = 0;
     int interfaceCrossings = 0;
     const Scene &scene = ctx.scene;
+    SampledSpectrum r(1.f);  // spectral MIS pdf ratios of the prefix (see Vertex::rPdf)
     while (true) {
         float tHit = Infinity;
         auto si = scene.Intersect(ray, Infinity, &tHit);
         bool scattered = false;
         float tScatter = 0;
         if (medium) {
-            auto ds = medium->SampleDistance(ray, si ? tHit : Infinity, ctx.sampler.Get1D(), ctx.lambda);
+            auto ds = medium->SampleDistanceHero(ray, si ? tHit : Infinity, ctx.sampler.Get1D(), ctx.lambda);
             beta *= ds.weight;
+            r *= ds.pdfRatio;
             scattered = ds.scattered;
             tScatter = ds.t;
         }
@@ -187,6 +189,7 @@ static int RandomWalk(BDPTContext &ctx, Ray ray, SampledSpectrum beta, float pdf
             vertex.si.medium = medium;
             vertex.g = medium->G();
             vertex.beta = beta;
+            vertex.rPdf = r;
             vertex.pdfFwd = prev.ConvertDensity(pdfFwd, vertex);
             if (++bounces >= maxDepth) break;
             float phasePdf;
@@ -202,6 +205,7 @@ static int RandomWalk(BDPTContext &ctx, Ray ray, SampledSpectrum beta, float pdf
                     vertex.infinite = true;
                     vertex.si.p = ray.o + ray.d;
                     vertex.beta = beta;
+                    vertex.rPdf = r;
                     vertex.pdfFwd = pdfFwd;
                     ++bounces;
                 }
@@ -220,6 +224,7 @@ static int RandomWalk(BDPTContext &ctx, Ray ray, SampledSpectrum beta, float pdf
                               ? EvaluateSurface(*si->primitive->material, vertex.si, ctx.lambda, ctx.buf)
                               : BSDF();
             vertex.beta = beta;
+            vertex.rPdf = r;
             vertex.pdfFwd = prev.ConvertDensity(pdfFwd, vertex);
             if (++bounces >= maxDepth) break;
             if (!vertex.bsdf) break;
@@ -241,7 +246,9 @@ static int RandomWalk(BDPTContext &ctx, Ray ray, SampledSpectrum beta, float pdf
         }
         prev.pdfRev = vertex.ConvertDensity(pdfRev, prev);
         if (ctx.russianRoulette && bounces > 3) {
-            float m = beta.MaxComponentValue();
+            // On the throughput as it will be weighted at connections.
+            float a = ctx.lambda.SecondaryTerminated() ? 1.f : r.Average();
+            float m = a > 0 && std::isfinite(a) ? beta.MaxComponentValue() / a : 0.f;
             if (m < 1) {
                 float q = std::max(0.f, 1 - m);
                 if (ctx.sampler.Get1D() < q) break;
@@ -417,6 +424,15 @@ SampledSpectrum ConnectBDPT(BDPTContext &ctx, Vertex *lightVertices, Vertex *cam
             L = qs.beta * qs.f(pt, TransportMode::Importance) * pt.f(qs, TransportMode::Radiance) * pt.beta;
             if (L) L *= G(ctx, qs, pt);
         }
+    }
+    // Spectral MIS over the full path (both subpaths share the hero wavelength). If dispersion
+    // has collapsed the sample to its hero wavelength, only the hero estimate is valid (factor 1).
+    if (L && !ctx.lambda.SecondaryTerminated()) {
+        SampledSpectrum r(1.f);
+        if (s > 0) r *= lightVertices[s - 1].rPdf;
+        if (t > 0) r *= cameraVertices[t - 1].rPdf;
+        float a = r.Average();
+        L = a > 0 && std::isfinite(a) ? L / a : SampledSpectrum(0.f);
     }
     float misWeight = L ? MISWeight(ctx, lightVertices, cameraVertices, sampled, s, t) : 0.f;
     L *= misWeight;

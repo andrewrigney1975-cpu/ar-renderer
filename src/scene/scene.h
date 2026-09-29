@@ -55,6 +55,9 @@ struct RenderSettings {
     std::vector<OutputSpec> outputs;
     std::string cameraName;
     uint64_t seed = 0;
+    // Also write denoised copies of the outputs (<name>.denoised.<ext>); the unbiased outputs
+    // are always written as well.
+    bool denoise = false;
 };
 
 class Scene {

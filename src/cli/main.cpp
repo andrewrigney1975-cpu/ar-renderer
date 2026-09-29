@@ -1,5 +1,6 @@
 // prender: spectral, unbiased Metropolis light transport renderer (command-line front end).
 
+#include "core/denoise.h"
 #include "core/film.h"
 #include "core/image.h"
 #include "core/fsutil.h"
@@ -55,6 +56,8 @@ struct Args {
     std::vector<std::string> outputs;
     std::vector<std::pair<std::string, std::string>> aovs;  // name, file
     int aovSpp = 16;
+    bool denoise = false;
+    std::optional<float> clamp;
     std::string preview;
     double previewInterval = 2.0;
     ProgressMode progress = ProgressMode::Text;
@@ -90,6 +93,8 @@ void PrintUsage() {
         "  --out <file>               output (repeatable): .exr .pfm .png .jpg\n"
         "  --aov <name>=<file>        auxiliary output: albedo, normal, depth, position (repeatable)\n"
         "  --aov-spp <n>              samples per pixel for AOVs (default 16)\n"
+        "  --denoise                  also write denoised outputs (<name>.denoised.<ext>, biased; OIDN)\n"
+        "  --clamp <Y>                firefly clamp: limit per-sample luminance (biased; path, bdpt)\n"
         "  --preview <file.png>       write a progressive preview periodically\n"
         "  --preview-interval <sec>   preview period (default 2)\n"
         "  --progress json|text|none  progress reporting on stdout (default text)\n"
@@ -218,6 +223,11 @@ bool ParseArgs(int argc, char **argv, Args *a, std::string *err) {
         } else if (s == "--aov-spp") {
             if (!(v = need(i))) return false;
             a->aovSpp = std::max(1, std::atoi(v));
+        } else if (s == "--denoise") {
+            a->denoise = true;
+        } else if (s == "--clamp") {
+            if (!(v = need(i))) return false;
+            a->clamp = std::max(0.f, float(std::atof(v)));
         } else if (s == "--preview") {
             if (!(v = need(i))) return false;
             a->preview = v;
@@ -375,6 +385,42 @@ bool WriteOutput(const Film &film, double scale, const OutputSpec &spec, std::st
     return false;
 }
 
+// Denoised copy of the film (scale folded in): film XYZ -> linear sRGB -> OIDN with albedo and
+// normal guides (followed through specular surfaces) -> XYZ. Writing it through a Film keeps
+// every output path (colour spaces, exposure, white balance, tone maps, formats) identical.
+std::unique_ptr<Film> MakeDenoisedFilm(const Scene &scene, const Film &film, double scale, int aovSpp, uint64_t seed,
+                                       std::string *err) {
+    const int w = film.Width(), h = film.Height();
+    const Mat3 &toRGB = XYZToRGBMatrix(ColorSpaceId::sRGB), &toXYZ = RGBToXYZMatrix(ColorSpaceId::sRGB);
+    Image color(w, h);
+    ParallelFor(h, [&](int64_t y, int) {
+        for (int x = 0; x < w; ++x) {
+            XYZ v = film.PixelXYZ(x, int(y)) * float(scale);
+            color.Set(x, int(y), toRGB.Apply(v.x, v.y, v.z));
+        }
+    }, 16);
+    Image albedo = RenderAOV(scene, AOVType::Albedo, aovSpp, seed, true);
+    Image normal = RenderAOV(scene, AOVType::Normal, aovSpp, seed, true);
+    if (!Denoise(color, &albedo, &normal, DenoiseOptions{}, err)) return nullptr;
+    auto out = std::make_unique<Film>(film.Settings());
+    ParallelFor(h, [&](int64_t y, int) {
+        for (int x = 0; x < w; ++x) {
+            RGB c = color.Get(x, int(y));
+            RGB v = toXYZ.Apply(c.r, c.g, c.b);
+            out->AddPixelXYZ(x, int(y), XYZ{v.r, v.g, v.b});
+        }
+    }, 16);
+    return out;
+}
+
+std::string DenoisedName(const std::string &file) {
+    fs::path p = Utf8Path(file);
+    fs::path name = p.stem();
+    name += ".denoised";
+    name += p.extension();
+    return PathUtf8(p.parent_path() / name);
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -450,6 +496,11 @@ int main(int argc, char **argv) {
             return ExitSceneError;
         }
     }
+    if (args.denoise) rs.denoise = true;
+    if (args.clamp) rs.film.clampLuminance = *args.clamp;
+    if (rs.film.clampLuminance > 0 &&
+        (rs.integrator.type == IntegratorType::MMLT || rs.integrator.type == IntegratorType::PSSMLT))
+        LogWarning("--clamp applies to the path tracer and BDPT only; ignored for MLT");
     if (args.device) {
         const std::string &d = *args.device;
         if (d == "cpu") rs.integrator.device = -1;
@@ -575,15 +626,38 @@ int main(int argc, char **argv) {
         spec.aov = name;
         rs.outputs.push_back(spec);
     }
-    for (const auto &o : rs.outputs) {
-        std::string e;
-        bool written_ok = o.aov.empty() ? WriteOutput(film, scale, o, &e) : WriteAOV(*scene, o, args.aovSpp, &e);
-        if (!written_ok) {
+    // Denoised outputs are extra files; the unbiased outputs are always written too.
+    std::unique_ptr<Film> denoised;
+    if (rs.denoise) {
+        std::string status;
+        if (!DenoiserAvailable(&status)) {
+            LogWarning("denoising skipped: {}", status);
+        } else {
+            Emit({{"event", "stage"}, {"name", "denoise"}});
+            double t0 = control.Elapsed();
+            std::string e;
+            denoised = MakeDenoisedFilm(*scene, film, scale, args.aovSpp, rs.seed, &e);
+            if (!denoised) LogWarning("denoising failed: {}", e);
+            else LogInfo("denoised in {:.1f}s", control.Elapsed() - t0);
+        }
+    }
+    auto report = [&](bool ok, const std::string &file, const std::string &e) {
+        if (!ok) {
             EmitError(e);
             rc = ExitIOError;
         } else {
-            written.push_back(PathUtf8(fs::absolute(Utf8Path(o.file))));
-            LogInfo("wrote {}", o.file);
+            written.push_back(PathUtf8(fs::absolute(Utf8Path(file))));
+            LogInfo("wrote {}", file);
+        }
+    };
+    for (const auto &o : rs.outputs) {
+        std::string e;
+        report(o.aov.empty() ? WriteOutput(film, scale, o, &e) : WriteAOV(*scene, o, args.aovSpp, &e), o.file, e);
+        if (denoised && o.aov.empty()) {
+            OutputSpec d = o;
+            d.file = DenoisedName(o.file);
+            std::string e2;
+            report(WriteOutput(*denoised, 1.0, d, &e2), d.file, e2);
         }
     }
     Emit({{"event", "done"}, {"outputs", written}, {"elapsed", control.Elapsed()}, {"cancelled", bool(control.cancel)}});

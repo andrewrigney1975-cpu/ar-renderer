@@ -43,6 +43,10 @@ struct FilmSettings {
     ColorSpaceId colorSpace = ColorSpaceId::sRGB;
     float exposure = 0;       // EV
     float whiteBalance = 0;   // Kelvin; 0 disables
+    // Firefly clamp: per camera sample, luminance (CIE Y) above this is scaled down, keeping the
+    // colour. 0 disables. Biased (energy is removed), so off by default; applies to samples added
+    // with AddSample (path tracer, BDPT and the GPU path tracer), not to MLT splats.
+    float clampLuminance = 0;
 };
 
 // Spectral film. Samples are splatted (with the filter) as CIE XYZ into an accumulation buffer
@@ -67,6 +71,11 @@ class Film {
     void AddSample(Vec2f pRaster, const SampledSpectrum &L, const SampledWavelengths &lambda,
                    float weight = 1.f);
     void AddXYZ(Vec2f pRaster, const XYZ &xyz);
+    // Accumulated XYZ of an image pixel (unscaled).
+    XYZ PixelXYZ(int x, int y) const {
+        size_t idx = 3 * (size_t(y) * settings_.width + x);
+        return {float(xyz_[idx].load()), float(xyz_[idx + 1].load()), float(xyz_[idx + 2].load())};
+    }
     // Adds directly to an image pixel (box-filtered estimators, e.g. the GPU path tracer).
     void AddPixelXYZ(int x, int y, const XYZ &xyz) {
         size_t idx = 3 * (size_t(y) * settings_.width + x);

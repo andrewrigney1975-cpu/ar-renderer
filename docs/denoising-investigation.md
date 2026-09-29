@@ -1,5 +1,7 @@
 # Denoising investigation
 
+> **Outcome (branch `feature/denoising`):** the causes of the speckle were found and fixed, and optional denoising was added. See §5. §§1–4 are the original investigation. Its first guess, that the rough dielectric boundary triggered the PSSMLT bias, turned out to be wrong.
+
 **Question:** should PRender offer an optional denoiser, accepting that it gives up "unbiased", to deal with speckling?
 
 **Short answer:** yes, as an *extra output* that never replaces the unbiased image. But the investigation found that much of the speckle in the example render is not noise. It is a **bias in the PSSMLT integrator** on coloured subsurface materials, and that needs fixing first. A denoiser run on that image produces a clean image with the wrong colours.
@@ -98,3 +100,66 @@ At 16K, the CPU would take roughly 35 s and about 8 GB unless tiled. OIDN tiles 
 | UI checkbox, raw/denoised toggle | Small |
 | OIDN GPU device (shared SYCL runtime) and denoised previews | Medium |
 | Firefly clamp option | Small |
+
+## 5. Outcome: what was wrong, and what was built
+
+### Two root causes of the colour speckle
+
+Both were found on a single wax-like sphere: a dielectric boundary around a strongly chromatic scattering interior.
+
+1. **A Metropolis sampler bug**, which caused the bias.
+   - In `MLTSampler`, a primary sample that a path uses for the first time started from value 0.
+   - Until a chain accepted its first large step, that value was small-stepped away from 0, so it stayed near 0 or 1 for about 1/σ² iterations (σ = 0.01).
+   - PSSMLT's subpath lengths vary wildly inside a scattering interior, so it keeps reaching new coordinates. Near-zero values mean near-zero free-flight distances, which biased long random walks.
+   - Measured on the sphere at depth 96: red ×1.17 and green ×0.90, unchanged from 1,024 to 16,384 mutations per pixel.
+   - Found by elimination:
+     - Path evaluation was deterministic (49k replays, no mismatches).
+     - No coordinate was used twice.
+     - The independence sampler (large steps only) converged, while small steps did not.
+   - The fix is one line: never-drawn samples are marked with modification iteration −1, so their first use draws a uniform value. pbrt-v4's sampler has the same pattern; it only matters when path lengths vary a lot.
+2. **Exponential variance of per-event spectral MIS**, which caused the noise.
+   - Each medium event picked a wavelength channel and weighted by the balance heuristic for that event.
+   - The per-wavelength weights then multiply over every scattering event, so for long random walks they grow exponentially. That is the 2.9% fireflies measured in the path tracer.
+   - Replaced by **path-level spectral MIS** (Miller, Georgiev and Jarosz 2019; pbrt-v4's volumetric path tracer):
+     - Distances are sampled with the hero wavelength.
+     - Each path, or each BDPT subpath vertex, tracks the ratio of every wavelength's path pdf to the hero's.
+     - Contributions are divided by the average ratio.
+   - For BDPT, the ratios of both subpaths are multiplied at the connection. BDPT's strategy weights depend only on geometry, so they remain a partition of unity.
+   - If dispersion reduces a path to its hero wavelength, the hero-only estimate is used.
+
+### Validation
+
+| Check | Result |
+|---|---|
+| Path tracer, old vs new estimator, at depths 8 and 24 (where the old one is well-behaved) | Agree within 0.5% on every channel |
+| Path tracer on the wax sphere | Per-pixel variance 24× lower; fireflies 0.2% → 0% |
+| Path tracer on the whole sample scene | Variance 23% lower; means within 0.7% |
+| Old path tracer at 32,768 spp vs new at 8,192 | Red converges to the new value (the old estimator had undersampled it by 5%) |
+| PSSMLT on the wax sphere, against a 131k-spp reference | 1.002 / 1.000 / 0.996 (±1%); before: 1.17 / 0.90 / 0.96 |
+| BDPT and MMLT on the wax sphere | Within 2% of the path tracer per channel |
+| GPU path tracer vs CPU | Wax 1.007 / 1.006 / 0.995; sample scene 0.9996 |
+
+A lesson from the process: an apparent 3% residual colour tilt in MLT turned out to be noise in a *single* 4,096-spp reference shared by every seed. Compare against a much stronger reference before calling a small residual a bias.
+
+### New features
+
+- **`--denoise`** (scene: `render.denoise`; UI: *Denoise* checkbox with a *Denoised* toggle):
+  - Writes `<name>.denoised.<ext>` next to every image output.
+  - Film XYZ is converted to linear sRGB, clamped to ≥ 0 and denoised by OIDN with albedo and normal guides, then converted back through a second film, so all output formats, colour spaces and tone maps work unchanged.
+  - The guides follow perfectly specular reflection and refraction to the first non-specular surface, or take the scattering colour of an entered medium.
+  - OIDN 2.5.1 is loaded at runtime (`build.cmd oidn`, CPU device only). Denoising the 960×540 sample scene takes 2.5 s, guides included.
+- **`--clamp <Y>`** (scene: `render.film.clamp`; UI: *Firefly clamp*): a per-sample luminance limit for the path tracer, BDPT and GPU path tracer. It keeps the sample's colour, is off by default, and is ignored with a warning for MLT.
+
+### Tests added (`tests/test_quality.cpp`)
+
+- The MLT sampler draws first-used coordinates uniformly (mean distance to 0/1: 0.252 against 0.021 with the bug).
+- The path tracer, BDPT, MMLT and PSSMLT agree per colour channel on the wax sphere.
+- The path tracer's per-pixel noise on the wax sphere stays bounded.
+- The firefly clamp limits luminance, keeps colour, and is off by default.
+- The albedo guide shows the red wall through a glass sphere, and the normal guide the wall's normal.
+- OIDN reduces error (relMSE 0.0063 → 0.0010) without changing brightness (skipped when OIDN is not installed).
+
+### Still open
+
+- Dispersive glass still produces coloured fireflies. Continuous spectral MIS for dispersion (West et al. 2020) is the research-level next step.
+- OIDN's GPU device (41 ms at 4K) needs `prender_gpu` moved to the oneAPI release whose SYCL runtime matches OIDN's.

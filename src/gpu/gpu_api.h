@@ -14,7 +14,7 @@
 
 namespace prgpu {
 
-constexpr int kApiVersion = 3;
+constexpr int kApiVersion = 4;
 
 // Spectra are tabulated at 5 nm from 360 to 830 nm (95 samples) and interpolated linearly.
 constexpr int kSpectrumSamples = 95;
@@ -150,7 +150,7 @@ struct RenderParams {
     int32_t firstSample;  // sample index offset (progressive rendering / determinism)
     uint64_t seed;
     int32_t maxDepth;     // <= 0: unlimited (Russian roulette)
-    uint32_t pad;
+    float clampLuminance; // per-sample luminance limit (firefly clamp), 0 = off
 };
 
 struct DeviceInfo {

@@ -11,6 +11,13 @@ namespace pr {
 
 // Participating medium with spectrally varying coefficients (units: 1/scene unit) and a
 // Henyey-Greenstein phase function. Rays passed in must have normalized directions.
+// Component-wise a / b, with 0 where b is 0.
+inline SampledSpectrum SafeDiv(const SampledSpectrum &a, const SampledSpectrum &b) {
+    SampledSpectrum r;
+    for (int i = 0; i < NSpectrumSamples; ++i) r[i] = b[i] != 0 ? a[i] / b[i] : 0.f;
+    return r;
+}
+
 class Medium {
   public:
     explicit Medium(float g) : g_(Clamp(g, -0.99f, 0.99f)) {}
@@ -23,13 +30,27 @@ class Medium {
         bool scattered = false;
         float t = 0;
         SampledSpectrum weight;  // throughput multiplier (already divided by the sampling pdf)
+        // Hero sampling only: pdf of this event had wavelength i driven the sampling, divided by
+        // the pdf of the hero-driven sampling that was used (1 when sampling is wavelength-neutral).
+        SampledSpectrum pdfRatio{1.f};
     };
 
     // Transmittance along ray over [0, tMax).
     virtual SampledSpectrum Transmittance(const Ray &ray, float tMax, const SampledWavelengths &lambda) const = 0;
     // Sample a real scattering event in [0, tMax) (or pass through). u drives all randomness,
-    // so the result is a deterministic function of u (required for Metropolis sampling).
+    // so the result is a deterministic function of u (required for Metropolis sampling). The
+    // sampling pdf does not depend on which wavelength is the hero, as BDPT's MIS requires.
     virtual DistanceSample SampleDistance(const Ray &ray, float tMax, float u, const SampledWavelengths &lambda) const = 0;
+    // Distance sampling driven by the hero wavelength alone, for path-level spectral MIS (Miller
+    // et al. 2019): the caller accumulates pdfRatio over the path and divides the path's estimate
+    // by its average. Per-event mixing (SampleDistance) lets per-wavelength weights grow
+    // exponentially with the number of scattering events in chromatic media; this keeps them
+    // bounded by the number of wavelengths. Default: wavelength-neutral sampling (ratio 1).
+    virtual DistanceSample SampleDistanceHero(const Ray &ray, float tMax, float u, const SampledWavelengths &lambda) const {
+        return SampleDistance(ray, tMax, u, lambda);
+    }
+    // sigma_s / sigma_t: the colour of a scattering interior (used for denoiser guide buffers).
+    virtual SampledSpectrum ScatteringAlbedo(const SampledWavelengths &lambda) const = 0;
 
   private:
     float g_;
@@ -49,6 +70,10 @@ class HomogeneousMedium : public Medium {
 
     SampledSpectrum Transmittance(const Ray &ray, float tMax, const SampledWavelengths &lambda) const override;
     DistanceSample SampleDistance(const Ray &ray, float tMax, float u, const SampledWavelengths &lambda) const override;
+    DistanceSample SampleDistanceHero(const Ray &ray, float tMax, float u, const SampledWavelengths &lambda) const override;
+    SampledSpectrum ScatteringAlbedo(const SampledWavelengths &lambda) const override {
+        return SafeDiv(sigma_s_->Sample(lambda), sigma_a_->Sample(lambda) + sigma_s_->Sample(lambda));
+    }
 
   private:
     SpectrumPtr sigma_a_, sigma_s_;
@@ -118,6 +143,9 @@ class GridMedium : public Medium {
 
     SampledSpectrum Transmittance(const Ray &ray, float tMax, const SampledWavelengths &lambda) const override;
     DistanceSample SampleDistance(const Ray &ray, float tMax, float u, const SampledWavelengths &lambda) const override;
+    SampledSpectrum ScatteringAlbedo(const SampledWavelengths &lambda) const override {
+        return SafeDiv(sigma_s_->Sample(lambda), sigma_a_->Sample(lambda) + sigma_s_->Sample(lambda));
+    }
     DensityField &Field() { return *field_; }
     // If the field has no bounds yet, bound it by a world-space box (e.g. the enclosing object).
     void FitBoundsToWorld(const Bounds3f &world) {

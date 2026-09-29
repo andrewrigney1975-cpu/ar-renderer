@@ -1330,9 +1330,10 @@ inline SS SampleLd(const DevScene &s, const Vertex &v, const BSDF *b, const Lamb
     return f * T * Le * (w / lightPdf);
 }
 
-inline bool RussianRoulette(SS &beta, float etaScale, int depth, RNG &rng) {
+// weightScale: factor the throughput will be multiplied by when contributing (spectral MIS).
+inline bool RussianRoulette(SS &beta, float etaScale, float weightScale, int depth, RNG &rng) {
     if (depth <= 1) return true;
-    float mx = MaxC(beta) * etaScale;
+    float mx = MaxC(beta) * etaScale * weightScale;
     if (mx >= 1) return true;
     float q = sycl::fmax(0.f, 1 - mx);
     if (rng.U() < q) return false;
@@ -1346,37 +1347,45 @@ template <bool kFull> inline SS Li(const DevScene &s, V3 o, V3 d, Lambda &lam, R
     int depth = 0, crossings = 0, medium = s.cameraMedium;
     float etaScale = 1, prevPdf = 1;
     V3 prevP = o;
+    // Path-level spectral MIS for media (as pr::PathIntegrator): distances are sampled with the
+    // hero wavelength, r[i] = path pdf with wavelength i as hero / hero path pdf, and every
+    // contribution is divided by the average of r. Lhero keeps the unweighted sum for paths whose
+    // secondary wavelengths are terminated by dispersion.
+    SS r = Splat(1), Lhero = Splat(0);
+    auto misScale = [&]() {
+        float a = 0.25f * (r.v[0] + r.v[1] + r.v[2] + r.v[3]);
+        return a > 0 && sycl::isfinite(a) ? 1 / a : 0.f;
+    };
+    auto terminated = [&]() { return lam.pdf[1] == 0 && lam.pdf[2] == 0 && lam.pdf[3] == 0; };
+    auto add = [&](SS c) {
+        Lhero = Lhero + c;
+        L = L + c * misScale();
+    };
+    auto rrScale = [&]() { return terminated() ? 1.f : misScale(); };
     for (int guard = 0; guard < 8192; ++guard) {
         Hit h;
         bool hit = Intersect(s, o, d, kInf, &h, false);
 
         if (medium >= 0) {
-            // Homogeneous distance sampling with one-sample spectral MIS (as pr::HomogeneousMedium).
+            // Homogeneous distance sampling driven by the hero wavelength (index 0).
             const Medium &md = s.media[medium];
             SS ss = TabSS(s.spectra, md.sigmaS, lam) * md.scale;
             SS st = TabSS(s.spectra, md.sigmaA, lam) * md.scale + ss;
-            int active[4], nActive = 0;
-            for (int i = 0; i < 4; ++i)
-                if (lam.pdf[i] != 0) active[nActive++] = i;
-            if (nActive == 0) active[nActive++] = 0;
-            float u = rng.U();
-            int ci = sycl::min(int(u * float(nActive)), nActive - 1);
-            float uu = sycl::fmin(u * float(nActive) - float(ci), kOneMinusEps);
-            float sc = st.v[active[ci]];
+            float u = sycl::fmin(rng.U(), kOneMinusEps);
             float tMax = hit ? h.t : kInf;
-            float t = sc > 0 ? -sycl::log(1 - uu) / sc : kInf;
+            float t = st.v[0] > 0 ? -sycl::log(1 - u) / st.v[0] : kInf;
             if (t < tMax) {
-                float pdf = 0;
                 SS T;
                 for (int i = 0; i < 4; ++i) T.v[i] = sycl::exp(-st.v[i] * t);
-                for (int k = 0; k < nActive; ++k) pdf += st.v[active[k]] * T.v[active[k]];
-                pdf /= float(nActive);
-                beta = pdf > 0 ? beta * T * ss * (1 / pdf) : Splat(0);
+                float pdf0 = st.v[0] * T.v[0];
+                if (!(pdf0 > 0)) break;
+                beta = beta * T * ss * (1 / pdf0);
+                r = r * st * T * (1 / pdf0);
                 if (!NonZero(beta)) break;
                 if (maxDepth > 0 && depth >= maxDepth) break;
                 ++depth;
                 Vertex v{o + d * t, V3{0, 0, 0}, V3{0, 0, 0}, -d, md.g, medium, medium};
-                L = L + beta * SampleLd<kFull, false>(s, v, nullptr, lam, rng);
+                add(beta * SampleLd<kFull, false>(s, v, nullptr, lam, rng));
                 float u0 = rng.U(), u1 = rng.U(), phasePdf;
                 V3 wi = SampleHG(v.wo, md.g, u0, u1, &phasePdf);
                 if (!(phasePdf > 0)) break;
@@ -1385,15 +1394,15 @@ template <bool kFull> inline SS Li(const DevScene &s, V3 o, V3 d, Lambda &lam, R
                 specular = false;
                 o = v.p;
                 d = wi;
-                if (!RussianRoulette(beta, etaScale, depth, rng)) break;
+                if (!RussianRoulette(beta, etaScale, rrScale(), depth, rng)) break;
                 continue;
             }
-            float pSurf = 0;
+            // Passing through has probability T[i] when wavelength i drives the sampling.
             SS T;
             for (int i = 0; i < 4; ++i) T.v[i] = tMax >= kInf ? (st.v[i] > 0 ? 0.f : 1.f) : sycl::exp(-st.v[i] * tMax);
-            for (int k = 0; k < nActive; ++k) pSurf += T.v[active[k]];
-            pSurf /= float(nActive);
-            beta = pSurf > 0 ? beta * T * (1 / pSurf) : Splat(0);
+            if (!(T.v[0] > 0)) break;
+            beta = beta * T * (1 / T.v[0]);
+            r = r * T * (1 / T.v[0]);
             if (!NonZero(beta)) break;
         }
 
@@ -1402,7 +1411,7 @@ template <bool kFull> inline SS Li(const DevScene &s, V3 o, V3 d, Lambda &lam, R
                 SS Le = TabSS(s.spectra, s.envSpectrum, lam) * s.envScale;
                 float w = 1;
                 if (depth > 0 && !specular) w = PowerHeuristic(prevPdf, s.envPmf * kInv4Pi);
-                L = L + beta * Le * w;
+                add(beta * Le * w);
             }
             break;
         }
@@ -1414,7 +1423,7 @@ template <bool kFull> inline SS Li(const DevScene &s, V3 o, V3 d, Lambda &lam, R
             if (NonZero(Le)) {
                 float w = 1;
                 if (depth > 0 && !specular) w = PowerHeuristic(prevPdf, l.pmf * AreaPdf(l, prevP, sf.p, sf.n));
-                L = L + beta * Le * w;
+                add(beta * Le * w);
             }
         }
         const Material &m = s.mats[pr.material];
@@ -1430,7 +1439,7 @@ template <bool kFull> inline SS Li(const DevScene &s, V3 o, V3 d, Lambda &lam, R
         BSDF b = MakeBSDF<kFull>(s, m, sf, lam);
         V3 wo = -d;
         Vertex v{sf.p, sf.n, sf.ns, wo, 0.f, pr.mediumInside, pr.mediumOutside};
-        if (b.NonSpecular()) L = L + beta * SampleLd<kFull, true>(s, v, &b, lam, rng);
+        if (b.NonSpecular()) add(beta * SampleLd<kFull, true>(s, v, &b, lam, rng));
 
         BSample bs;
         float uc = rng.U(), u0 = rng.U(), u1 = rng.U();
@@ -1445,9 +1454,9 @@ template <bool kFull> inline SS Li(const DevScene &s, V3 o, V3 d, Lambda &lam, R
         d = bs.wi;
         medium = MediumToward(v, d);
         if (!NonZero(beta) || !sycl::isfinite(MaxC(beta))) break;
-        if (!RussianRoulette(beta, etaScale, depth, rng)) break;
+        if (!RussianRoulette(beta, etaScale, rrScale(), depth, rng)) break;
     }
-    return L;
+    return terminated() ? Lhero : L;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1487,7 +1496,9 @@ inline float FilterSample1D(const FilterK &f, float u, float *pdf) {
 // One work-item renders all samples of one pixel (so the film needs no atomics). kFull enables
 // coated and sheen materials; scenes without them use a leaner kernel (less register pressure).
 template <bool kFull>
-inline void RenderPixel(const DevScene &ds, int pix, int w, int spp, int first, uint64_t seed, int maxDepth, float *film) {
+inline void RenderPixel(const DevScene &ds, int pix, int w, int spp, int first, uint64_t seed, int maxDepth, float clampY,
+                        float *film) {
+    const float norm = 1.f / (4 * ds.yIntegral);
     int px = pix % w, py = pix / w;
     const Camera &c = ds.cam;
     float X = 0, Y = 0, Z = 0;
@@ -1526,17 +1537,23 @@ inline void RenderPixel(const DevScene &ds, int pix, int w, int spp, int first, 
              M[8] * org.x + M[9] * org.y + M[10] * org.z + M[11]};
         V3 dw = Norm(V3{M[0] * dir.x + M[1] * dir.y + M[2] * dir.z, M[4] * dir.x + M[5] * dir.y + M[6] * dir.z,
                         M[8] * dir.x + M[9] * dir.y + M[10] * dir.z});
-        SS L = Li<kFull>(ds, o, dw, lam, rng, maxDepth) * fw;
+        SS L = Li<kFull>(ds, o, dw, lam, rng, maxDepth);
         if (!sycl::isfinite(L.v[0] + L.v[1] + L.v[2] + L.v[3])) continue;
+        float sx = 0, sy = 0, sz = 0;
         for (int i = 0; i < 4; ++i) {
             if (lam.pdf[i] == 0) continue;
             float v = L.v[i] / lam.pdf[i];
-            X += CieX(lam.l[i]) * v;
-            Y += CieY(lam.l[i]) * v;
-            Z += CieZ(lam.l[i]) * v;
+            sx += CieX(lam.l[i]) * v;
+            sy += CieY(lam.l[i]) * v;
+            sz += CieZ(lam.l[i]) * v;
         }
+        // Firefly clamp on the sample's luminance, before the filter weight (as pr::Film::AddSample).
+        float k = fw;
+        if (clampY > 0 && sy * norm > clampY) k *= clampY / (sy * norm);
+        X += sx * k;
+        Y += sy * k;
+        Z += sz * k;
     }
-    float norm = 1.f / (4 * ds.yIntegral);
     film[3 * pix + 0] = X * norm;
     film[3 * pix + 1] = Y * norm;
     film[3 * pix + 2] = Z * norm;
@@ -1684,11 +1701,12 @@ PRGPU_API int prgpu_render(int deviceIndex, const SceneDesc *sd, const RenderPar
         }
         float *film = st.film;
         const int spp = rp->spp, first = rp->firstSample, maxDepth = rp->maxDepth;
+        const float clampY = rp->clampLuminance;
         const uint64_t seed = rp->seed;
         auto launch = [&](auto full) {
             constexpr bool kFull = decltype(full)::value;
             q.parallel_for(sycl::range<1>(size_t(w) * h), [=](sycl::id<1> id) {
-                 RenderPixel<kFull>(ds, int(id[0]), w, spp, first, seed, maxDepth, film);
+                 RenderPixel<kFull>(ds, int(id[0]), w, spp, first, seed, maxDepth, clampY, film);
              }).wait_and_throw();
         };
         bool full = false;

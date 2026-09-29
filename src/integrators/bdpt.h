@@ -14,6 +14,11 @@ enum class VertexType { Camera, Light, Surface, Medium };
 struct Vertex {
     VertexType type = VertexType::Surface;
     SampledSpectrum beta;
+    // Path-level spectral MIS: (pdf of this subpath prefix had wavelength i been the hero) /
+    // (its hero pdf). Media are sampled with the hero wavelength; connections divide by the
+    // average of the combined ratios, which keeps per-wavelength weights bounded in chromatic
+    // media (see Medium::SampleDistanceHero).
+    SampledSpectrum rPdf{1.f};
     SurfaceInteraction si;       // position/normals/medium info for all vertex types
     BSDF bsdf;                   // surface vertices
     float g = 0;                 // medium vertices (HG asymmetry)

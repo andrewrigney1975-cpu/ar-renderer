@@ -65,7 +65,13 @@ class MLTSampler : public Sampler {
   private:
     struct PrimarySample {
         float value = 0;
-        int64_t lastModificationIteration = 0;
+        // -1 = never drawn. A coordinate that a path uses for the first time must start from a
+        // uniform value (conceptually drawn by the initial large step), not from 0: otherwise,
+        // until the chain's first accepted large step, it is small-stepped away from 0 and stays
+        // near 0/1 for ~1/sigma^2 iterations. Paths of varying length (random walks in media)
+        // keep reaching new coordinates, which biased PSSMLT (e.g. 16% too red on chromatic
+        // subsurface scattering).
+        int64_t lastModificationIteration = -1;
         float valueBackup = 0;
         int64_t modifyBackup = 0;
         void Backup() {
