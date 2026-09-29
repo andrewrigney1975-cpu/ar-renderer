@@ -116,6 +116,7 @@ public sealed partial class MainWindow : Window
                     ResolutionBox.Items.Add(new ComboBoxItem { Content = label, Tag = (w, h) });
                 ResolutionBox.SelectedIndex = 0;
                 SamplesBox.Value = IsMlt() ? doc.MutationsPerPixel : doc.Spp;
+                MaxDepthBox.Value = doc.MaxDepth;
             }
             foreach (var (name, cam) in doc.Cameras)
                 if (!_editedCameras.Contains(name)) _cameras[name] = cam.Clone();
@@ -371,6 +372,8 @@ public sealed partial class MainWindow : Window
             "--progress", "json", "--control", "stdin",
             "--seed", ((long)SeedBox.Value).ToString(CultureInfo.InvariantCulture),
             "--device", SelectedDevice,
+            // Always explicit: 0 selects the integrator's default rather than the scene's value.
+            "--max-depth", (double.IsNaN(MaxDepthBox.Value) ? 0 : (int)MaxDepthBox.Value).ToString(CultureInfo.InvariantCulture),
         };
         double samples = double.IsNaN(SamplesBox.Value) ? 64 : SamplesBox.Value;
         args.Add(mlt ? "--mutations" : "--spp");

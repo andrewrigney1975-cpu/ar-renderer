@@ -109,6 +109,7 @@
                                 <RowDefinition Height="Auto" />
                                 <RowDefinition Height="Auto" />
                                 <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
                             </Grid.RowDefinitions>
                             <ComboBox x:Name="CameraBox" Header="Camera" HorizontalAlignment="Stretch" SelectionChanged="OnCameraChanged" />
                             <ComboBox x:Name="IntegratorBox" Grid.Column="1" Header="Integrator" HorizontalAlignment="Stretch"
@@ -126,7 +127,10 @@
                                        SpinButtonPlacementMode="Compact" SmallChange="10" LargeChange="60" Value="0" />
                             <NumberBox x:Name="SeedBox" Grid.Row="2" Grid.Column="1" Header="Seed" Minimum="0" Maximum="2147483647"
                                        SpinButtonPlacementMode="Compact" Value="1" />
-                            <ComboBox x:Name="DeviceBox" Grid.Row="3" Grid.ColumnSpan="2" Header="Device" HorizontalAlignment="Stretch"
+                            <NumberBox x:Name="MaxDepthBox" Grid.Row="3" Header="Max depth (0 = default)" Minimum="0" Maximum="4096"
+                                       SpinButtonPlacementMode="Compact" SmallChange="8" LargeChange="32" Value="0"
+                                       ToolTipService.ToolTip="Longest light path in bounces. MLT and BDPT never sample longer paths, so use 64+ for heavy subsurface scattering. 0 = integrator default: 32 for MLT, 256 for BDPT, unlimited (Russian roulette) for the path tracer." />
+                            <ComboBox x:Name="DeviceBox" Grid.Row="4" Grid.ColumnSpan="2" Header="Device" HorizontalAlignment="Stretch"
                                       SelectionChanged="OnDeviceChanged"
                                       ToolTipService.ToolTip="GPU rendering (oneAPI/SYCL) supports the path tracer; other integrators run on the CPU" />
                         </Grid>

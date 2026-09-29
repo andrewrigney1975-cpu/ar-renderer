@@ -145,6 +145,8 @@ public sealed class SceneDocument
     public string Integrator { get; private set; } = "mmlt";
     public double MutationsPerPixel { get; private set; } = 256;
     public int Spp { get; private set; } = 64;
+    /// <summary>render.integrator.max_depth; 0 = the integrator's default.</summary>
+    public int MaxDepth { get; private set; }
     public Vector3 SkyColor { get; private set; } = new(0.1f, 0.12f, 0.16f);
     public List<string> Warnings { get; } = new();
 
@@ -313,6 +315,7 @@ public sealed class SceneDocument
             Integrator = integ["type"]?.GetValue<string>() ?? "mmlt";
             MutationsPerPixel = Num(integ["mutations_per_pixel"], 256);
             Spp = (int)Num(integ["spp"], 64);
+            MaxDepth = Math.Max(0, (int)Num(integ["max_depth"], 0));
         }
 
         var materials = root["materials"]!.AsObject();
