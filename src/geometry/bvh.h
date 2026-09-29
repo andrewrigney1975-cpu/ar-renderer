@@ -40,7 +40,9 @@ class BVH {
         Vec3f c;
         int index;
     };
-    int BuildRecursive(std::vector<BuildPrim> &prims, int start, int end);
+    int BuildRecursive(std::vector<BuildPrim> &prims, int start, int end, std::vector<Node> &nodes, int depth);
+    void BuildChildren(std::vector<BuildPrim> &prims, int start, int mid, int end, std::vector<Node> &nodes, int parent,
+                       int depth);
 
     std::vector<Node> nodes_;
     std::vector<const Shape *> shapes_;  // reordered
