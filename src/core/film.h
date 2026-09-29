@@ -25,9 +25,12 @@ class Filter {
     explicit Filter(const FilterSettings &s);
     float Radius() const { return radius_; }
     float Evaluate(float dx, float dy) const { return Eval1D(dx) * Eval1D(dy) * norm_; }
+    float Eval1D(float x) const;
+    FilterType Type() const { return type_; }
+    float Sigma() const { return sigma_; }
+    float Norm() const { return norm_; }
 
   private:
-    float Eval1D(float x) const;
     FilterType type_;
     float radius_;
     float sigma_ = 0.5f;
@@ -55,6 +58,7 @@ class Film {
     int Height() const { return settings_.height; }
     // Extended sampling domain in raster space: [-margin, width+margin) x [-margin, height+margin).
     int Margin() const { return margin_; }
+    const Filter &GetFilter() const { return filter_; }
     int SampleWidth() const { return settings_.width + 2 * margin_; }
     int SampleHeight() const { return settings_.height + 2 * margin_; }
     int64_t SamplePixelCount() const { return int64_t(SampleWidth()) * SampleHeight(); }
@@ -63,6 +67,13 @@ class Film {
     void AddSample(Vec2f pRaster, const SampledSpectrum &L, const SampledWavelengths &lambda,
                    float weight = 1.f);
     void AddXYZ(Vec2f pRaster, const XYZ &xyz);
+    // Adds directly to an image pixel (box-filtered estimators, e.g. the GPU path tracer).
+    void AddPixelXYZ(int x, int y, const XYZ &xyz) {
+        size_t idx = 3 * (size_t(y) * settings_.width + x);
+        xyz_[idx + 0].fetch_add(double(xyz.x), std::memory_order_relaxed);
+        xyz_[idx + 1].fetch_add(double(xyz.y), std::memory_order_relaxed);
+        xyz_[idx + 2].fetch_add(double(xyz.z), std::memory_order_relaxed);
+    }
     void Clear();
     // Checkpointing of the raw accumulators, streamed to/from a file in chunks (no full copy).
     bool WriteAccumulators(FILE *f) const;

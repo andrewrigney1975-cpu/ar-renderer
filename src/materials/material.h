@@ -56,6 +56,9 @@ class Material {
     void SetSheen(SheenParams s) { sheen_ = std::move(s); }
     void SetNormalMap(NormalMapParams n) { normalMap_ = std::move(n); }
     void SetBumpMap(BumpMapParams b) { bumpMap_ = std::move(b); }
+    bool HasSheen() const { return sheen_.weight > 0; }
+    const SheenParams &Sheen() const { return sheen_; }
+    bool HasShadingPerturbation() const { return normalMap_.image || bumpMap_.height; }
     std::string name;
 
   protected:
@@ -75,6 +78,7 @@ BSDF EvaluateSurface(const Material &m, SurfaceInteraction &si, SampledWavelengt
 class DiffuseMaterial : public Material {
   public:
     explicit DiffuseMaterial(SpectrumTexturePtr r) : reflectance_(std::move(r)) {}
+    const SpectrumTexturePtr &Reflectance() const { return reflectance_; }
 
   protected:
     const BxDF *GetBxDF(const MaterialEvalContext &ctx, SampledWavelengths &lambda, ScratchBuffer &buf) const override;
@@ -92,6 +96,7 @@ struct ConductorParams {
 class ConductorMaterial : public Material {
   public:
     explicit ConductorMaterial(ConductorParams p) : p_(std::move(p)) {}
+    const ConductorParams &Params() const { return p_; }
     static const BxDF *MakeBxDF(const ConductorParams &p, const MaterialEvalContext &ctx,
                                 const SampledWavelengths &lambda, ScratchBuffer &buf);
 
@@ -107,6 +112,10 @@ class DielectricMaterial : public Material {
     DielectricMaterial(SpectrumPtr eta, FloatTexturePtr uRough, FloatTexturePtr vRough, bool thin)
         : eta_(std::move(eta)), uRough_(std::move(uRough)), vRough_(std::move(vRough)), thin_(thin) {}
     bool IsDispersive() const { return !eta_->IsConstant(); }
+    const SpectrumPtr &Eta() const { return eta_; }
+    const FloatTexturePtr &URoughness() const { return uRough_; }
+    const FloatTexturePtr &VRoughness() const { return vRough_; }
+    bool Thin() const { return thin_; }
 
   protected:
     const BxDF *GetBxDF(const MaterialEvalContext &ctx, SampledWavelengths &lambda, ScratchBuffer &buf) const override;
@@ -130,6 +139,8 @@ class CoatedDiffuseMaterial : public Material {
   public:
     CoatedDiffuseMaterial(CoatParams coat, SpectrumTexturePtr reflectance)
         : coat_(std::move(coat)), reflectance_(std::move(reflectance)) {}
+    const SpectrumTexturePtr &Reflectance() const { return reflectance_; }
+    const CoatParams &Coat() const { return coat_; }
 
   protected:
     const BxDF *GetBxDF(const MaterialEvalContext &ctx, SampledWavelengths &lambda, ScratchBuffer &buf) const override;
@@ -143,6 +154,8 @@ class CoatedConductorMaterial : public Material {
   public:
     CoatedConductorMaterial(CoatParams coat, ConductorParams conductor)
         : coat_(std::move(coat)), conductor_(std::move(conductor)) {}
+    const ConductorParams &Conductor() const { return conductor_; }
+    const CoatParams &Coat() const { return coat_; }
 
   protected:
     const BxDF *GetBxDF(const MaterialEvalContext &ctx, SampledWavelengths &lambda, ScratchBuffer &buf) const override;

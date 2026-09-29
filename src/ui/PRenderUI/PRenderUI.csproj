@@ -28,5 +28,7 @@
   <!-- Ship the renderer next to the UI when it has been built (build.cmd builds it first). -->
   <ItemGroup Condition="Exists('$(MSBuildThisFileDirectory)..\..\..\build\bin\prender.exe')">
     <None Include="$(MSBuildThisFileDirectory)..\..\..\build\bin\prender.exe" Link="prender.exe" CopyToOutputDirectory="PreserveNewest" />
+    <!-- Optional GPU module (build.cmd gpu) and its oneAPI runtime DLLs. -->
+    <None Include="$(MSBuildThisFileDirectory)..\..\..\build\bin\*.dll" Link="%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

@@ -43,6 +43,9 @@ class HomogeneousMedium : public Medium {
 
     SampledSpectrum SigmaA(const SampledWavelengths &lambda) const { return sigma_a_->Sample(lambda) * scale_; }
     SampledSpectrum SigmaS(const SampledWavelengths &lambda) const { return sigma_s_->Sample(lambda) * scale_; }
+    const SpectrumPtr &SigmaAPtr() const { return sigma_a_; }
+    const SpectrumPtr &SigmaSPtr() const { return sigma_s_; }
+    float Scale() const { return scale_; }
 
     SampledSpectrum Transmittance(const Ray &ray, float tMax, const SampledWavelengths &lambda) const override;
     DistanceSample SampleDistance(const Ray &ray, float tMax, float u, const SampledWavelengths &lambda) const override;

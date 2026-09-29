@@ -64,6 +64,9 @@ public sealed partial class MainWindow : Window
 
         _rendererExe = RenderJob.LocateRenderer();
         RendererText.Text = _rendererExe is null ? "prender.exe not found (set PRENDER_EXE or build the renderer)" : $"renderer: {_rendererExe}";
+        DeviceBox.Items.Add(new ComboBoxItem { Content = "CPU", Tag = "cpu" });
+        DeviceBox.SelectedIndex = 0;
+        _devicesReady = PopulateDevicesAsync();
 
         Closed += (_, _) => _job?.Dispose();
 
@@ -106,7 +109,7 @@ public sealed partial class MainWindow : Window
                     cb.Click += (_, _) => { if (_scenePath is not null) LoadScene(_scenePath, resetUi: false); };
                     RigPanel.Children.Add(cb);
                 }
-                SelectIntegrator(doc.Integrator);
+                SelectIntegrator(GpuSelected ? "path" : doc.Integrator);
                 ResolutionBox.Items.Clear();
                 ResolutionBox.Items.Add(new ComboBoxItem { Content = $"Scene ({doc.FilmWidth} × {doc.FilmHeight})", Tag = (doc.FilmWidth, doc.FilmHeight) });
                 foreach (var (label, w, h) in Resolutions)
@@ -196,6 +199,48 @@ public sealed partial class MainWindow : Window
     private void OnCameraChanged(object sender, SelectionChangedEventArgs e)
     {
         if (!_suppressEvents) ApplyCamera();
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Render device
+
+    private Task _devicesReady = Task.CompletedTask;
+
+    private string SelectedDevice => (DeviceBox.SelectedItem as ComboBoxItem)?.Tag as string ?? "cpu";
+    private bool GpuSelected => SelectedDevice != "cpu";
+
+    private async Task PopulateDevicesAsync()
+    {
+        if (_rendererExe is null) return;
+        var (devices, gpuStatus) = await RenderJob.ListDevicesAsync(_rendererExe);
+        App.Log($"devices: {string.Join(", ", devices.Select(d => d.Id))} (gpu: {gpuStatus})");
+        DeviceBox.Items.Clear();
+        foreach (var d in devices)
+        {
+            string label = d.IsGpu ? $"{d.Name} ({d.MemoryMb / 1024:0} GB)" : d.Id == "cpu" ? $"CPU · {Environment.ProcessorCount} threads" : d.Name;
+            DeviceBox.Items.Add(new ComboBoxItem { Content = label, Tag = d.Id });
+        }
+        DeviceBox.SelectedIndex = 0;
+        // Developer aid: --device <id> preselects a device (e.g. with --autorender).
+        string[] argv = Environment.GetCommandLineArgs();
+        int di = Array.IndexOf(argv, "--device");
+        if (di >= 0 && di + 1 < argv.Length)
+            foreach (ComboBoxItem item in DeviceBox.Items)
+                if ((string)item.Tag == argv[di + 1] || (argv[di + 1] == "gpu" && (string)item.Tag == "gpu:0")) DeviceBox.SelectedItem = item;
+        if (!devices.Any(d => d.IsGpu)) AppendLog($"GPU rendering unavailable: {gpuStatus}");
+    }
+
+    private void OnDeviceChanged(object sender, SelectionChangedEventArgs e)
+    {
+        // The GPU implements the path tracer only: lock the integrator while a GPU is selected.
+        bool gpu = GpuSelected;
+        foreach (ComboBoxItem item in IntegratorBox.Items)
+            item.IsEnabled = !gpu || (string)item.Tag == "path";
+        if (gpu && SelectedIntegrator != "path")
+        {
+            SelectIntegrator("path");
+            if (_doc is not null) SamplesBox.Value = _doc.Spp;
+        }
     }
 
     private void OnIntegratorChanged(object sender, SelectionChangedEventArgs e)
@@ -325,6 +370,7 @@ public sealed partial class MainWindow : Window
             "--preview", Path.Combine(_outputDir, "preview.png"), "--preview-interval", "1",
             "--progress", "json", "--control", "stdin",
             "--seed", ((long)SeedBox.Value).ToString(CultureInfo.InvariantCulture),
+            "--device", SelectedDevice,
         };
         double samples = double.IsNaN(SamplesBox.Value) ? 64 : SamplesBox.Value;
         args.Add(mlt ? "--mutations" : "--spp");
@@ -522,7 +568,11 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    public void StartRenderFromCommandLine() => DispatcherQueue.TryEnqueue(StartRender);
+    public void StartRenderFromCommandLine() => DispatcherQueue.TryEnqueue(async () =>
+    {
+        await _devicesReady;
+        StartRender();
+    });
 
     public async Task SaveScreenshotAndExitAsync(string path, double delaySeconds)
     {

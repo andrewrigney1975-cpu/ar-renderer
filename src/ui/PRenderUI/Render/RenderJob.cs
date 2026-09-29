@@ -103,6 +103,53 @@ public sealed class RenderJob : IDisposable
         return null;
     }
 
+    /// <summary>A render device reported by <c>prender --list-devices</c>.</summary>
+    public sealed record RenderDevice(string Id, string Name, bool IsGpu, double MemoryMb);
+
+    /// <summary>
+    /// Queries the renderer's devices (CPU first). Returns just the CPU when the query fails;
+    /// <paramref name="gpuStatus"/> explains why no GPU is listed.
+    /// </summary>
+    public static async Task<(List<RenderDevice> Devices, string GpuStatus)> ListDevicesAsync(string exe)
+    {
+        var devices = new List<RenderDevice>();
+        string status = "unknown";
+        try
+        {
+            var psi = new ProcessStartInfo(exe)
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            };
+            foreach (var a in new[] { "--list-devices", "--progress", "json" }) psi.ArgumentList.Add(a);
+            using var p = Process.Start(psi)!;
+            var stderr = p.StandardError.ReadToEndAsync();
+            string output = await p.StandardOutput.ReadToEndAsync();
+            await p.WaitForExitAsync();
+            await stderr;
+            foreach (var line in output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                if (JsonNode.Parse(line) is not JsonObject obj || (string?)obj["event"] != "devices") continue;
+                status = (string?)obj["gpu_status"] ?? status;
+                foreach (var d in obj["devices"]?.AsArray() ?? new JsonArray())
+                {
+                    if (d is null) continue;
+                    devices.Add(new RenderDevice((string?)d["id"] ?? "cpu", (string?)d["name"] ?? "?",
+                                                 (bool?)d["gpu"] ?? false, (double?)d["memory_mb"] ?? 0));
+                }
+            }
+        }
+        catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or IOException or InvalidOperationException
+                                       or System.Text.Json.JsonException)
+        {
+            status = ex.Message;
+        }
+        if (devices.Count == 0) devices.Add(new RenderDevice("cpu", "CPU", false, 0));
+        return (devices, status);
+    }
+
     /// <summary>Finds the bundled sample scene by walking up from the app directory.</summary>
     public static string? LocateSampleScene()
     {

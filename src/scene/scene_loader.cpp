@@ -8,6 +8,7 @@
 
 #include "nlohmann/json.hpp"
 
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -431,6 +432,7 @@ class Loader {
     std::vector<ObjectRecord> objects_;
     std::vector<std::pair<int, EmissionSpec>> pendingEmission_;
     std::vector<GridMedium *> gridMedia_;
+    std::map<std::string, std::shared_ptr<TriangleMesh>> meshCache_;
 };
 
 std::shared_ptr<const ImageData> Loader::GetImage(const json &tex, const std::string &id) {
@@ -865,9 +867,14 @@ void Loader::AddObject(const json &o, int index) {
                 if (idx < 0 || idx >= int(mesh->p.size())) Fail("geometry '" + gid + "': index out of range");
             mesh->closed = GetBool(g, "closed", false);
         } else if (gtype == "mesh") {
-            std::string err;
-            auto loaded = LoadMesh(GetString(g, "file", ""), &err);
-            if (!loaded) Fail("geometry '" + gid + "': " + err);
+            // Each file is parsed once per load, however many objects instance it.
+            std::string file = GetString(g, "file", "");
+            std::shared_ptr<TriangleMesh> &loaded = meshCache_[file];
+            if (!loaded) {
+                std::string err;
+                loaded = LoadMesh(file, &err);
+                if (!loaded) Fail("geometry '" + gid + "': " + err);
+            }
             mesh = std::make_shared<TriangleMesh>(*loaded);
             mesh->closed = GetBool(g, "closed", false);
         } else if (gtype == "gltf") {
@@ -1198,6 +1205,13 @@ void Loader::ParseRender() {
             if (fl.is_object() && fl.contains("radius")) rs.film.filter.radius = fl["radius"].get<float>();
         }
     }
+    if (r.contains("device")) {
+        std::string d = GetString(r, "device", "cpu");
+        if (d == "cpu") rs.integrator.device = -1;
+        else if (d == "gpu") rs.integrator.device = 0;
+        else if (d.rfind("gpu:", 0) == 0) rs.integrator.device = std::atoi(d.c_str() + 4);
+        else Fail("render.device must be 'cpu', 'gpu' or 'gpu:N'");
+    }
     if (opts_.width > 0) rs.film.width = opts_.width;
     if (opts_.height > 0) rs.film.height = opts_.height;
     if (r.contains("integrator")) {
@@ -1270,6 +1284,8 @@ std::unique_ptr<Scene> Loader::Load() {
     scene_->settings.outputs.clear();
     ParseRender();
 
+    auto t0 = std::chrono::steady_clock::now();
+    auto since = [](auto t) { return std::chrono::duration<double>(std::chrono::steady_clock::now() - t).count(); };
     int idx = 0;
     for (const auto &o : doc_["objects"]) {
         if (GetBool(o, "visible", true)) AddObject(o, idx);
@@ -1290,7 +1306,10 @@ std::unique_ptr<Scene> Loader::Load() {
         if (!gm->HasBounds()) Fail("medium '" + gm->name + "': heterogeneous media need 'bounds' or an enclosing object");
     }
     ParseCamera();
+    LogVerbose("load: objects, materials and media in {:.3f}s", since(t0));
+    auto t1 = std::chrono::steady_clock::now();
     scene_->Build();
+    LogVerbose("load: BVH and light structures in {:.3f}s ({} primitives)", since(t1), scene_->primitives.size());
     if (scene_->lights.empty()) LogWarning("scene has no lights; the image will be black");
     return std::move(scene_);
 }

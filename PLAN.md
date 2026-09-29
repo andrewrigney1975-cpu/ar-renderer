@@ -410,3 +410,15 @@ Built and verified: renderer, tests (`build.cmd test`: 30 cases passing), WinUI 
 | 2 | **Investigate GPU rendering with oneAPI (Intel dGPUs, e.g. Arc)** | Evaluate SYCL/DPC++ (oneAPI) for the core kernels and Embree 4 SYCL for GPU ray tracing on Arc. Wavefront path tracing first (path/BDPT), then MLT with many chains per GPU. Keep spectral, unbiased semantics identical and validate against the CPU reference with the existing agreement tests. Deliverable: a spike report on feasibility, performance and toolchain impact (the Intel oneAPI DPC++ compiler alongside MSVC). |
 | 3 | **User-selectable render device (CPU or GPU)** | Add a `--device cpu|gpu[:index]` CLI option and `render.device` in the scene, report the available devices (`--list-devices`), and add a Device selector to the UI render panel. Fall back to the CPU with a warning when no GPU is available or the integrator or feature isn't supported on the GPU. Depends on #2. |
 | 4 | **Add 4K, 8K and 16K output resolutions** — ✅ Done (v0.3) | UI presets (4K 3840×2160, 8K 7680×4320, 16K 15360×8640) and `--res 4k|8k|16k`. Streamed row-by-row EXR (ZIP, blocks compressed in parallel), PFM and PNG writers; chunked checkpoint I/O; downscaled previews (max 2048 px); MLT rounds capped for responsiveness; film memory estimate and warning in the CLI and UI; huge results decoded at display size in the UI. Verified: a 16K render writes a 1.5 GB EXR, a 380 MB PNG and a 3 GB checkpoint. |
+
+**Investigation of items 1–3:** see [`docs/acceleration-investigation.md`](docs/acceleration-investigation.md). In summary: CPU scaling is 1.6× from 8 to 24 threads (ideal about 1.85×), and loading is serial. The recommended route is a data-oriented refactor plus Embree 4, then a oneAPI SYCL wavefront path tracer on the Arc A770 (hardware RT through Embree 4 SYCL, float film accumulation because the GPU has no fast FP64), then device selection, shipped as a runtime-loaded GPU module with CPU fallback.
+
+**Progress (branch `feature/acceleration`):**
+- CPU quick wins: dense-scene load 1.0 s → 0.18 s.
+- GPU trial: a SYCL megakernel path tracer in `prender_gpu.dll`, selected with `--device gpu`. On the A770 it runs **12–16× faster** than the 24-thread CPU path tracer, with mean-image agreement within 0.06%.
+- GPU feature parity with the CPU path tracer: media, subsurface, coats, sheen, pixel filters and checkpoint/resume. Validated per material against the CPU (within 0.15%). Speed-up is 2–3× on scenes with coats/sheen (megakernel register pressure) and 6–16× without.
+- Device selection (item 3) is done in the CLI, the scene file and the UI's *Device* selector.
+- Next: wavefront scheduling (sorting by material), then Embree 4 SYCL hardware ray tracing.
+
+See §7 of the investigation.
+

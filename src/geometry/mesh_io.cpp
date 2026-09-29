@@ -1,5 +1,8 @@
 #include "geometry/shape.h"
 
+#include "core/log.h"
+
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -8,7 +11,11 @@
 #include <fstream>
 #include <map>
 #include <sstream>
+#include <charconv>
 #include <tuple>
+#include <unordered_map>
+
+#include "core/rng.h"
 
 namespace pr {
 
@@ -19,48 +26,94 @@ std::string Lower(std::string s) {
     return s;
 }
 
+// Fast OBJ parser: the whole file is read at once and scanned with std::from_chars (no streams,
+// no per-line allocations). Vertex/uv/normal triples are deduplicated with a hash map.
 std::shared_ptr<TriangleMesh> LoadOBJ(const std::string &path, std::string *err) {
-    std::ifstream in(Utf8Path(path), std::ios::binary);
-    if (!in) {
-        *err = "cannot open " + path;
-        return nullptr;
+    std::string text;
+    {
+        std::ifstream in(Utf8Path(path), std::ios::binary);
+        if (!in) {
+            *err = "cannot open " + path;
+            return nullptr;
+        }
+        in.seekg(0, std::ios::end);
+        text.resize(size_t(in.tellg()));
+        in.seekg(0);
+        in.read(text.data(), std::streamsize(text.size()));
     }
     std::vector<Vec3f> P, N;
     std::vector<Vec2f> T;
     auto mesh = std::make_shared<TriangleMesh>();
-    std::map<std::tuple<int, int, int>, int> remap;
+    struct KeyHash {
+        size_t operator()(const std::tuple<int, int, int> &k) const {
+            return size_t(RNG::MixBits(uint64_t(uint32_t(std::get<0>(k))) * 0x9E3779B97F4A7C15ull ^
+                                       (uint64_t(uint32_t(std::get<1>(k))) << 21) ^ uint64_t(uint32_t(std::get<2>(k)))));
+        }
+    };
+    std::unordered_map<std::tuple<int, int, int>, int, KeyHash> remap;
     bool anyNormals = false, anyUVs = false;
-    std::string line;
     auto resolve = [](int idx, size_t count) { return idx < 0 ? int(count) + idx : idx - 1; };
-    while (std::getline(in, line)) {
-        if (line.size() < 2) continue;
-        std::istringstream ss(line);
-        std::string tag;
-        ss >> tag;
-        if (tag == "v") {
+    const char *c = text.data(), *end = c + text.size();
+    auto skipSpace = [&] {
+        while (c < end && (*c == ' ' || *c == '\t' || *c == '\r')) ++c;
+    };
+    auto readFloat = [&](float *v) {
+        skipSpace();
+        auto r = std::from_chars(c, end, *v);
+        if (r.ec != std::errc()) *v = 0;
+        c = r.ptr;
+    };
+    auto readInt = [&](int *v) {
+        auto r = std::from_chars(c, end, *v);
+        if (r.ec != std::errc()) {
+            *v = 0;
+            return false;
+        }
+        c = r.ptr;
+        return true;
+    };
+    std::vector<int> face;
+    while (c < end) {
+        skipSpace();
+        const char *lineStart = c;
+        if (c + 1 < end && c[0] == 'v' && (c[1] == ' ' || c[1] == '\t')) {
+            c += 1;
             Vec3f v;
-            ss >> v.x >> v.y >> v.z;
+            readFloat(&v.x);
+            readFloat(&v.y);
+            readFloat(&v.z);
             P.push_back(v);
-        } else if (tag == "vn") {
+        } else if (c + 2 < end && c[0] == 'v' && c[1] == 'n' && (c[2] == ' ' || c[2] == '\t')) {
+            c += 2;
             Vec3f v;
-            ss >> v.x >> v.y >> v.z;
+            readFloat(&v.x);
+            readFloat(&v.y);
+            readFloat(&v.z);
             N.push_back(v);
-        } else if (tag == "vt") {
+        } else if (c + 2 < end && c[0] == 'v' && c[1] == 't' && (c[2] == ' ' || c[2] == '\t')) {
+            c += 2;
             Vec2f v;
-            ss >> v.x >> v.y;
+            readFloat(&v.x);
+            readFloat(&v.y);
             T.push_back(v);
-        } else if (tag == "f") {
-            std::vector<int> face;
-            std::string tok;
-            while (ss >> tok) {
+        } else if (c + 1 < end && c[0] == 'f' && (c[1] == ' ' || c[1] == '\t')) {
+            c += 1;
+            face.clear();
+            while (true) {
+                skipSpace();
+                if (c >= end || *c == '\n' || *c == '#') break;
                 int vi = 0, ti = 0, ni = 0;
-                const char *s = tok.c_str();
-                vi = std::atoi(s);
-                const char *slash = std::strchr(s, '/');
-                if (slash) {
-                    if (slash[1] != '/') ti = std::atoi(slash + 1);
-                    const char *slash2 = std::strchr(slash + 1, '/');
-                    if (slash2) ni = std::atoi(slash2 + 1);
+                if (!readInt(&vi)) {
+                    *err = "OBJ: malformed face in " + path;
+                    return nullptr;
+                }
+                if (c < end && *c == '/') {
+                    ++c;
+                    if (c < end && *c != '/') readInt(&ti);
+                    if (c < end && *c == '/') {
+                        ++c;
+                        readInt(&ni);
+                    }
                 }
                 int pv = resolve(vi, P.size());
                 int pt = ti ? resolve(ti, T.size()) : -1;
@@ -69,25 +122,22 @@ std::shared_ptr<TriangleMesh> LoadOBJ(const std::string &path, std::string *err)
                     *err = "OBJ: bad vertex index in " + path;
                     return nullptr;
                 }
-                auto key = std::make_tuple(pv, pt, pn);
-                auto it = remap.find(key);
-                int idx;
-                if (it == remap.end()) {
-                    idx = int(mesh->p.size());
-                    remap[key] = idx;
+                auto [it, inserted] = remap.try_emplace(std::make_tuple(pv, pt, pn), int(mesh->p.size()));
+                if (inserted) {
                     mesh->p.push_back(P[pv]);
                     mesh->uv.push_back(pt >= 0 && pt < int(T.size()) ? T[pt] : Vec2f(0, 0));
                     mesh->n.push_back(pn >= 0 && pn < int(N.size()) ? Normalize(N[pn]) : Vec3f());
                     anyUVs |= pt >= 0;
                     anyNormals |= pn >= 0;
-                } else {
-                    idx = it->second;
                 }
-                face.push_back(idx);
+                face.push_back(it->second);
             }
             for (size_t i = 1; i + 1 < face.size(); ++i)
                 mesh->indices.insert(mesh->indices.end(), {face[0], face[i], face[i + 1]});
         }
+        (void)lineStart;
+        while (c < end && *c != '\n') ++c;  // skip the rest of the line (comments, unknown tags)
+        if (c < end) ++c;
     }
     if (!anyUVs) mesh->uv.clear();
     if (!anyNormals) mesh->n.clear();
@@ -258,6 +308,12 @@ std::shared_ptr<TriangleMesh> LoadPLY(const std::string &path, std::string *err)
 } // namespace
 
 std::shared_ptr<TriangleMesh> LoadMesh(const std::string &path, std::string *err) {
+    auto t0 = std::chrono::steady_clock::now();
+    struct Timer {
+        std::chrono::steady_clock::time_point t;
+        std::string p;
+        ~Timer() { LogVerbose("load: mesh {} parsed in {:.3f}s", p, std::chrono::duration<double>(std::chrono::steady_clock::now() - t).count()); }
+    } timer{t0, path};
     std::string ext = Lower(std::filesystem::path(path).extension().string());
     if (ext == ".obj") return LoadOBJ(path, err);
     if (ext == ".ply") return LoadPLY(path, err);

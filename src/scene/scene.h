@@ -38,6 +38,7 @@ struct IntegratorSettings {
     double timeLimit = 0;           // seconds; 0 = none
     bool russianRoulette = true;    // path / bdpt only
     bool lightBVH = true;           // path: importance-based light selection (else by power)
+    int device = -1;                // -1 = CPU; >= 0 = GPU device index (path tracer only)
 };
 
 struct OutputSpec {
@@ -79,6 +80,7 @@ class Scene {
     void Build();
 
     Bounds3f Bounds() const { return bvh_.Bounds(); }
+    const BVH &GetBVH() const { return bvh_; }
     std::optional<SurfaceInteraction> Intersect(const Ray &ray, float tMax, float *tHit) const;
     bool IntersectP(const Ray &ray, float tMax) const { return bvh_.IntersectP(ray, tMax); }
 

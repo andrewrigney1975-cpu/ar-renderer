@@ -1,6 +1,7 @@
 #include "geometry/bvh.h"
 
 #include <algorithm>
+#include <future>
 
 namespace pr {
 
@@ -17,7 +18,7 @@ void BVH::Build(std::vector<const Shape *> shapes) {
         prims[i].index = int(i);
     }
     nodes_.reserve(2 * prims.size());
-    BuildRecursive(prims, 0, int(prims.size()));
+    BuildRecursive(prims, 0, int(prims.size()), nodes_, 0);
     shapes_.resize(prims.size());
     order_.resize(prims.size());
     for (size_t i = 0; i < prims.size(); ++i) {
@@ -26,19 +27,19 @@ void BVH::Build(std::vector<const Shape *> shapes) {
     }
 }
 
-int BVH::BuildRecursive(std::vector<BuildPrim> &prims, int start, int end) {
-    int nodeIndex = int(nodes_.size());
-    nodes_.emplace_back();
+int BVH::BuildRecursive(std::vector<BuildPrim> &prims, int start, int end, std::vector<Node> &out, int depth) {
+    int nodeIndex = int(out.size());
+    out.emplace_back();
     Bounds3f bounds, centroidBounds;
     for (int i = start; i < end; ++i) {
         bounds = Union(bounds, prims[i].b);
         centroidBounds = Union(centroidBounds, prims[i].c);
     }
-    nodes_[nodeIndex].bounds = bounds;
+    out[nodeIndex].bounds = bounds;
     int n = end - start;
     auto makeLeaf = [&] {
-        nodes_[nodeIndex].offset = start;
-        nodes_[nodeIndex].nPrims = uint16_t(n);
+        out[nodeIndex].offset = start;
+        out[nodeIndex].nPrims = uint16_t(n);
         return nodeIndex;
     };
     if (n <= 2) return makeLeaf();
@@ -47,9 +48,8 @@ int BVH::BuildRecursive(std::vector<BuildPrim> &prims, int start, int end) {
     if (cmax == cmin) {
         if (n <= 255) return makeLeaf();
         int mid = (start + end) / 2;
-        nodes_[nodeIndex].axis = uint8_t(dim);
-        BuildRecursive(prims, start, mid);
-        nodes_[nodeIndex].offset = BuildRecursive(prims, mid, end);
+        out[nodeIndex].axis = uint8_t(dim);
+        BuildChildren(prims, start, mid, end, out, nodeIndex, depth);
         return nodeIndex;
     }
 
@@ -105,11 +105,33 @@ int BVH::BuildRecursive(std::vector<BuildPrim> &prims, int start, int end) {
         std::nth_element(prims.begin() + start, prims.begin() + mid, prims.begin() + end,
                          [&](const BuildPrim &a, const BuildPrim &b) { return a.c[dim] < b.c[dim]; });
     }
-    nodes_[nodeIndex].axis = uint8_t(dim);
-    BuildRecursive(prims, start, mid);
-    int second = BuildRecursive(prims, mid, end);
-    nodes_[nodeIndex].offset = second;
+    out[nodeIndex].axis = uint8_t(dim);
+    BuildChildren(prims, start, mid, end, out, nodeIndex, depth);
     return nodeIndex;
+}
+
+void BVH::BuildChildren(std::vector<BuildPrim> &prims, int start, int mid, int end, std::vector<Node> &nodes,
+                        int parent, int depth) {
+    // Large subtrees near the root are built concurrently: the right child goes to a separate
+    // node array on another thread, then is spliced in after the left subtree (the two work on
+    // disjoint primitive ranges, so no synchronization is needed).
+    if (end - start >= 65536 && depth < 5) {
+        std::vector<Node> right;
+        right.reserve(size_t(2 * (end - mid)));
+        auto future = std::async(std::launch::async, [&] { BuildRecursive(prims, mid, end, right, depth + 1); });
+        BuildRecursive(prims, start, mid, nodes, depth + 1);
+        future.get();
+        int base = int(nodes.size());
+        for (Node n : right) {
+            if (n.nPrims == 0) n.offset += base;  // interior: second-child index is relative
+            nodes.push_back(n);
+        }
+        nodes[parent].offset = base;
+        return;
+    }
+    BuildRecursive(prims, start, mid, nodes, depth + 1);
+    int second = BuildRecursive(prims, mid, end, nodes, depth + 1);
+    nodes[parent].offset = second;
 }
 
 static inline bool IntersectBox(const Bounds3f &b, const Vec3f &o, const Vec3f &invDir, const int dirIsNeg[3],

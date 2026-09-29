@@ -28,19 +28,24 @@ class BVH {
     // Index into the original (pre-build) shape list.
     int OriginalIndex(int i) const { return order_[i]; }
 
-  private:
     struct Node {
         Bounds3f bounds;
         int offset = 0;        // leaf: first primitive; interior: second child
         uint16_t nPrims = 0;   // 0 => interior
         uint8_t axis = 0;
     };
+    const std::vector<Node> &Nodes() const { return nodes_; }
+    const std::vector<int> &Order() const { return order_; }
+
+  private:
     struct BuildPrim {
         Bounds3f b;
         Vec3f c;
         int index;
     };
-    int BuildRecursive(std::vector<BuildPrim> &prims, int start, int end);
+    int BuildRecursive(std::vector<BuildPrim> &prims, int start, int end, std::vector<Node> &nodes, int depth);
+    void BuildChildren(std::vector<BuildPrim> &prims, int start, int mid, int end, std::vector<Node> &nodes, int parent,
+                       int depth);
 
     std::vector<Node> nodes_;
     std::vector<const Shape *> shapes_;  // reordered

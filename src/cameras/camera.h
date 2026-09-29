@@ -66,6 +66,10 @@ class PerspectiveCamera : public Camera {
     void PDF_We(const Ray &ray, float *pdfPos, float *pdfDir) const override;
     std::optional<CameraWiSample> SampleWi(const Interaction &ref, Vec2f u) const override;
     Vec3f Position() const override { return cameraToWorld_.Point(Vec3f(0, 0, 0)); }
+    const Transform &CameraToWorld() const { return cameraToWorld_; }
+    float TanHalfFov() const { return tanHalf_; }
+    float LensRadius() const { return lensRadius_; }
+    float FocalDistance() const { return focalDistance_; }
 
   private:
     // Point on the z=1 plane (camera space) for a raster position, and back.
