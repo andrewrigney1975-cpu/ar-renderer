@@ -150,6 +150,7 @@ With `--progress json`, the renderer writes one JSON event per line on stdout. T
 - **Top, Front and Right** are schematic orthographic views. Drag to pan, use the wheel to zoom, and double-click to frame the scene. Hovering over an object shows its name.
 - **Camera** shows a quick ray-cast preview framed to the film aspect ratio. Drag to orbit, right-drag to pan and use the wheel to dolly. Edited cameras are rendered through a small override scene that includes the original file.
 - **Render panel** controls the camera, integrator, resolution, samples, time limit, seed, **max depth** (starts at the scene's value; 0 = the integrator's default), **device**, light rigs and optional AOVs. The device list is the CPU plus any GPU reported by `prender --list-devices`; choosing a GPU locks the integrator to the path tracer. **Denoise** also writes a denoised image, and a *Denoised* toggle switches the result between it and the unbiased render. **Firefly clamp** sets `--clamp`. **Render** launches `prender.exe`, shows the progressive preview live, and saves results under `%LOCALAPPDATA%\PRenderUI\renders\`. **Continue** resumes the last render from its checkpoint with twice the samples.
+- **Scene picker** (toolbar) lists the scenes next to the current one: every scene file in the subfolders of the folder above the current scene's folder (for the samples, `scenes\`). The list is rescanned whenever it is opened, so new or regenerated scenes appear without restarting. Opening a scene from elsewhere switches the list to that scene's surroundings.
 - **Open scene** accepts `.prscene.json`, `.gltf`, `.glb` and `.pbrt`. Foreign formats are normalized through `prender --convert`, and meshes are shown as bounding-box proxies.
 
 The app finds `prender.exe` next to itself, in a `build\bin` directory above it, or through `%PRENDER_EXE%`.
@@ -170,9 +171,11 @@ Scenes are JSON files that may contain comments. See [`schemas/prscene.schema.js
 | `cameras` | Any number of named cameras | Optics and pose only; film settings live in `render.film` |
 | `render` | Integrator, film and outputs | Every value can be overridden from the command line |
 
-`include` merges other files first: dictionary sections merge by id and `objects` are concatenated. `import` does the same for glTF, pbrt or scene files and can place them with a `transform`. The sample scene keeps materials in `materials.json` and each light rig in `rigs/*.json`.
+`include` merges other files first: dictionary sections merge by id and `objects` are concatenated. `import` does the same for glTF, pbrt or scene files and can place them with a `transform`. The sample scenes keep materials in `materials.json` and each light rig in `rigs/*.json`.
 
-## Sample scene
+## Sample scenes
+
+### Sphere pyramid
 
 `scenes/sphere-pyramid` is a square pyramid of 14 spheres (3×3 + 2×2 + 1) that exercises the main material and light-transport features:
 
@@ -187,6 +190,26 @@ Scenes are JSON files that may contain comments. See [`schemas/prscene.schema.js
 | Self-illumination | a 2700 K emitter at the apex |
 
 The `studio` rig has a gridded key light (cos^6 lobe), a large fill softbox and a cool sky. The `fog` rig adds a haze volume for light shafts. The `daylight` rig replaces both with a Preetham sun and sky. The `lens` camera views the scene through the double-Gauss lens with dispersion.
+
+### Diamonds
+
+`scenes/diamonds` shows six loose, gem-quality diamonds on draped ivory silk: three round brilliants (1.0, 0.5 and 0.3 ct), two princess cuts and a marquise. The stones lie table up, table down and on their sides.
+
+- **Stones:**
+  - The round brilliant has all 57 facets in ideal-cut proportions (table 57%, crown 34.5°, pavilion 40.75°). The princess has a two-tier crown and a chevron pavilion. The marquise is the brilliant mapped onto a 2:1 navette outline.
+  - The material is dispersive diamond (`"ior": "diamond"`), so the stones show real fire.
+- **Silk:** draped and creased, with a satin-weave bump map, rendered as a rough clear coat over an ivory base plus a sheen lobe.
+- **Rigs:**
+  - `jeweller` (default): a small hard key, two kickers, a dim softbox and a dark surround.
+  - `sparkle`: a ring of eight small LED disks, for maximum scintillation.
+  - `window`: soft side light.
+- **Cameras:** `main`, `closeup` (the 1 ct stone) and `top`.
+- **Rendering:** diamonds are the hardest case for any renderer. Their light arrives through chains of refractions and reflections from small lights, and dispersion reduces those paths to single wavelengths.
+  - Use **MMLT** (the default) for final images, with a large bootstrap (the scene uses 4 M samples) and thousands of mutations per pixel. At low counts the stones show coloured patches.
+  - The GPU path tracer is fine for framing and for the silk, but the stones stay speckled.
+  - Denoising smooths the speckle but tints the stones and blurs their facets, so it isn't recommended for this scene.
+
+`scenes/diamonds/generate.py` (Python with numpy, scipy and Pillow) regenerates the meshes, silk, texture, rigs and scene files. Change the cuts, stone placement or silk there rather than in the JSON.
 
 ## Tests
 
@@ -222,7 +245,7 @@ src/gpu           prender_gpu.dll: SYCL path-tracing kernel and its C ABI
 src/cli           prender.exe
 src/ui/PRenderUI  WinUI 3 front end (C#, Win2D)
 tests/            doctest unit and integration tests
-scenes/           sample scenes
+scenes/           sample scenes (sphere-pyramid, diamonds + its generator)
 schemas/          JSON Schema for .prscene.json
 ```
 

@@ -96,6 +96,8 @@ public sealed partial class MainWindow : Window
             _doc = doc;
             _scenePath = path;
             ScenePathText.Text = path;
+            _scenesRoot = SceneLibrary.RootFor(path) ?? _scenesRoot;
+            RefreshSceneList();
             ErrorBar.IsOpen = false;
             foreach (var w in doc.Warnings) AppendLog("warning: " + w);
 
@@ -192,6 +194,53 @@ public sealed partial class MainWindow : Window
         picker.FileTypeFilter.Add(".pbrt");
         var file = await picker.PickSingleFileAsync();
         if (file is not null) LoadScene(file.Path, resetUi: true);
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Scene picker: the scenes next to the current one (the folder above its folder).
+
+    private string? _scenesRoot;
+    private bool _suppressSceneBox;
+
+    private void RefreshSceneList()
+    {
+        var entries = _scenesRoot is null ? new List<SceneEntry>() : SceneLibrary.Find(_scenesRoot);
+        if (_scenePath is not null && !entries.Any(en => SamePath(en.Path, _scenePath)))
+            entries.Add(new SceneEntry(Path.GetFileName(_scenePath), _scenePath));
+        var current = SceneBox.Items.OfType<ComboBoxItem>().Select(i => ((string)i.Content, (string)i.Tag));
+        bool same = current.SequenceEqual(entries.Select(en => (en.Label, en.Path)));
+        _suppressSceneBox = true;
+        if (!same)
+        {
+            SceneBox.Items.Clear();
+            foreach (var en in entries)
+            {
+                var item = new ComboBoxItem { Content = en.Label, Tag = en.Path };
+                ToolTipService.SetToolTip(item, en.Path);
+                SceneBox.Items.Add(item);
+            }
+        }
+        SceneBox.SelectedItem = SceneBox.Items.OfType<ComboBoxItem>().FirstOrDefault(i => _scenePath is not null && SamePath((string)i.Tag, _scenePath));
+        _suppressSceneBox = false;
+    }
+
+    private static bool SamePath(string a, string b) =>
+        string.Equals(Path.GetFullPath(a), Path.GetFullPath(b), StringComparison.OrdinalIgnoreCase);
+
+    private void OnSceneDropDownOpened(object? sender, object e) => RefreshSceneList();
+
+    private void OnSceneSelected(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressSceneBox || SceneBox.SelectedItem is not ComboBoxItem { Tag: string path }) return;
+        if (_scenePath is not null && SamePath(path, _scenePath)) return;
+        if (_job is { IsRunning: true })
+        {
+            // Keep the rendering scene selected; switching mid-render would orphan the result.
+            RefreshSceneList();
+            StatusText.Text = "Cancel the render before switching scenes";
+            return;
+        }
+        LoadScene(path, resetUi: true);
     }
 
     private void OnReloadClick(object sender, RoutedEventArgs e)
