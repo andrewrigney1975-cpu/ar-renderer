@@ -481,6 +481,7 @@ bool GpuPathIntegrator::Render(const Scene &scene, Film &film, RenderControl &co
         rp.firstSample = done;
         rp.seed = seed_;
         rp.maxDepth = settings_.maxDepth;
+        rp.clampLuminance = film.Settings().clampLuminance;
         auto t0 = std::chrono::steady_clock::now();
         if (mod.render(device_, &sd, &rp, xyz.data(), msg, sizeof(msg)) != 0) {
             *err = std::string("GPU render failed: ") + msg;

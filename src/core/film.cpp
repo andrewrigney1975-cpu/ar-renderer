@@ -132,7 +132,10 @@ Image Film::ResolvePreview(double scale, ToneMap tm, int maxDim) const {
 
 void Film::AddSample(Vec2f p, const SampledSpectrum &L, const SampledWavelengths &lambda, float weight) {
     if (L.IsZero()) return;
-    AddXYZ(p, ToXYZ(L, lambda) * weight);
+    XYZ xyz = ToXYZ(L, lambda) * weight;
+    const float c = settings_.clampLuminance;
+    if (c > 0 && xyz.y > c) xyz = xyz * (c / xyz.y);
+    AddXYZ(p, xyz);
 }
 
 void Film::AddXYZ(Vec2f p, const XYZ &xyz) {

@@ -28,7 +28,7 @@ public sealed partial class MainWindow : Window
     private RenderJob? _job;
     private string? _rendererExe;
     private string? _outputDir;
-    private string? _finalImage;
+    private string? _finalImage, _denoisedImage;
     private bool _suppressEvents;
     private List<string>? _lastArgs;      // arguments of the last render (for Continue)
     private double _lastSamples;
@@ -64,6 +64,8 @@ public sealed partial class MainWindow : Window
 
         _rendererExe = RenderJob.LocateRenderer();
         RendererText.Text = _rendererExe is null ? "prender.exe not found (set PRENDER_EXE or build the renderer)" : $"renderer: {_rendererExe}";
+        // Developer aid: --denoise pre-ticks Denoise (e.g. with --autorender).
+        DenoiseCheck.IsChecked = Environment.GetCommandLineArgs().Contains("--denoise");
         DeviceBox.Items.Add(new ComboBoxItem { Content = "CPU", Tag = "cpu" });
         DeviceBox.SelectedIndex = 0;
         _devicesReady = PopulateDevicesAsync();
@@ -305,10 +307,20 @@ public sealed partial class MainWindow : Window
             Process.Start(new ProcessStartInfo("explorer.exe", $"\"{_outputDir}\"") { UseShellExecute = true });
     }
 
+    // The image being shown: the denoised result when present and selected, else the raw one.
+    private string? ShownImage => DenoisedToggle.IsChecked == true && _denoisedImage is not null ? _denoisedImage : _finalImage;
+
     private void OnImageTapped(object sender, RoutedEventArgs e)
     {
-        if (_finalImage is not null && File.Exists(_finalImage))
-            Process.Start(new ProcessStartInfo(_finalImage) { UseShellExecute = true });
+        string? img = ShownImage;
+        if (img is not null && File.Exists(img))
+            Process.Start(new ProcessStartInfo(img) { UseShellExecute = true });
+    }
+
+    private void OnDenoisedToggle(object sender, RoutedEventArgs e)
+    {
+        string? img = ShownImage;
+        if (img is not null) _ = ShowImageAsync(img, ++_previewVersion);
     }
 
     // ---------------------------------------------------------------------------------------
@@ -380,6 +392,12 @@ public sealed partial class MainWindow : Window
         args.Add(samples.ToString(CultureInfo.InvariantCulture));
         _lastCheckpoint = Path.Combine(_outputDir, "state.prck");
         args.AddRange(new[] { "--checkpoint", _lastCheckpoint, "--checkpoint-interval", "30" });
+        if (DenoiseCheck.IsChecked == true) args.Add("--denoise");
+        if (!double.IsNaN(ClampBox.Value) && ClampBox.Value > 0)
+        {
+            args.Add("--clamp");
+            args.Add(ClampBox.Value.ToString(CultureInfo.InvariantCulture));
+        }
         if (AovCheck.IsChecked == true)
             foreach (var aov in new[] { "albedo", "normal", "depth" })
             {
@@ -414,7 +432,8 @@ public sealed partial class MainWindow : Window
     private void LaunchRenderer(List<string> args)
     {
         if (_rendererExe is null || _outputDir is null) return;
-        _finalImage = null;
+        _finalImage = _denoisedImage = null;
+        DenoisedToggle.IsEnabled = false;
         _previewVersion++;
         LogBox.Text = $"> prender {string.Join(' ', args.Select(a => a.Contains(' ') ? $"\"{a}\"" : a))}\n";
         Progress.Value = 0;
@@ -479,6 +498,7 @@ public sealed partial class MainWindow : Window
                     "bootstrap" => "Bootstrapping Markov chains…",
                     "render" => "Rendering…",
                     "write" => "Writing images…",
+                    "denoise" => "Denoising…",
                     _ => name,
                 };
                 break;
@@ -512,10 +532,17 @@ public sealed partial class MainWindow : Window
             {
                 double elapsed = ev["elapsed"]?.GetValue<double>() ?? 0;
                 bool cancelled = ev["cancelled"]?.GetValue<bool>() ?? false;
-                var outputs = ev["outputs"] as JsonArray;
-                _finalImage = outputs?.Select(o => o?.GetValue<string>()).FirstOrDefault(p => p?.EndsWith(".png", StringComparison.OrdinalIgnoreCase) == true);
-                if (_finalImage is not null) _ = ShowImageAsync(_finalImage, ++_previewVersion);
+                var outputs = (ev["outputs"] as JsonArray)?.Select(o => o?.GetValue<string>()).OfType<string>().ToList() ?? new();
+                bool IsPng(string p) => p.EndsWith(".png", StringComparison.OrdinalIgnoreCase);
+                bool IsDenoised(string p) => p.EndsWith(".denoised.png", StringComparison.OrdinalIgnoreCase);
+                _finalImage = outputs.FirstOrDefault(p => IsPng(p) && !IsDenoised(p));
+                _denoisedImage = outputs.FirstOrDefault(IsDenoised);
+                DenoisedToggle.IsEnabled = _denoisedImage is not null;
+                DenoisedToggle.IsChecked = _denoisedImage is not null;
+                if (ShownImage is string shown) _ = ShowImageAsync(shown, ++_previewVersion);
                 StatusText.Text = cancelled ? $"Cancelled after {elapsed:0.0}s (partial result saved)" : $"Done in {elapsed:0.0}s";
+                if (DenoiseCheck.IsChecked == true && _denoisedImage is null)
+                    StatusText.Text += " · denoising unavailable (see log)";
                 Progress.Value = 100;
                 OpenImageButton.IsEnabled = _finalImage is not null;
                 break;

@@ -5,3 +5,4 @@ out/
 bin/
 obj/
 *.log
+third_party/oidn/

@@ -145,6 +145,18 @@
 
                         <CheckBox x:Name="AovCheck" Content="Also write AOVs (albedo, normal, depth)" />
 
+                        <Grid ColumnSpacing="10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <CheckBox x:Name="DenoiseCheck" Content="Denoise" VerticalAlignment="Bottom"
+                                      ToolTipService.ToolTip="Also write a denoised image (Intel Open Image Denoise). Denoising is biased: it removes noise but can shift colours slightly, so the unbiased render is always kept too." />
+                            <NumberBox x:Name="ClampBox" Grid.Column="1" Header="Firefly clamp (0 = off)" Minimum="0" Maximum="1000000"
+                                       SpinButtonPlacementMode="Compact" SmallChange="1" LargeChange="10" Value="0"
+                                       ToolTipService.ToolTip="Limit each sample's luminance to this value (path tracer and BDPT). Removes fireflies but also real energy (biased). Try 5–50 for this scene; 0 turns it off." />
+                        </Grid>
+
                         <Grid ColumnSpacing="8">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*" />
@@ -196,6 +208,8 @@
                                     <TextBlock Text="Open image" />
                                 </StackPanel>
                             </Button>
+                            <ToggleButton x:Name="DenoisedToggle" Content="Denoised" IsEnabled="False" Click="OnDenoisedToggle"
+                                          ToolTipService.ToolTip="Switch between the denoised and the unbiased (raw) image" />
                         </StackPanel>
 
                         <Expander Header="Renderer log" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">

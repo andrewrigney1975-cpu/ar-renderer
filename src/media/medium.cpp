@@ -68,6 +68,40 @@ Medium::DistanceSample HomogeneousMedium::SampleDistance(const Ray &ray, float t
     return ds;
 }
 
+Medium::DistanceSample HomogeneousMedium::SampleDistanceHero(const Ray &ray, float tMax, float u,
+                                                             const SampledWavelengths &lambda) const {
+    SampledSpectrum ss = SigmaS(lambda);
+    SampledSpectrum st = SigmaA(lambda) + ss;
+    DistanceSample ds;
+    // Sampled with the hero (index 0); wavelengths whose extinction is zero cannot drive a
+    // scattering event, so their paths are left to the rotations in which they are the hero.
+    float t = st[0] > 0 ? -std::log(1 - std::min(u, OneMinusEpsilon)) / st[0] : Infinity;
+    if (t < tMax) {
+        SampledSpectrum Tr = Exp(-st * t);
+        float pdf0 = st[0] * Tr[0];
+        ds.scattered = true;
+        ds.t = t;
+        if (!(pdf0 > 0)) {
+            ds.weight = SampledSpectrum(0.f);
+            return ds;
+        }
+        ds.weight = Tr * ss / pdf0;
+        ds.pdfRatio = st * Tr / pdf0;
+        return ds;
+    }
+    SampledSpectrum Tr = Transmittance(ray, tMax, lambda);
+    ds.scattered = false;
+    ds.t = tMax;
+    // Passing through has probability Tr[i] when wavelength i drives the sampling.
+    if (!(Tr[0] > 0)) {
+        ds.weight = SampledSpectrum(0.f);
+        return ds;
+    }
+    ds.weight = Tr / Tr[0];
+    ds.pdfRatio = Tr / Tr[0];
+    return ds;
+}
+
 // ---------------------------------------------------------------------------------------------
 // Density fields
 

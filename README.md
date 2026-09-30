@@ -13,6 +13,7 @@ A physically based, **spectral**, **unbiased** renderer driven by **Metropolis L
   - A volumetric path tracer used as the reference
   - Unbiased throughout: MLT uses bootstrap resampling and expected-value splatting, termination is by Russian roulette, and there is no clamping, radiance caching or photon merging.
 - **Spectral transport** uses hero wavelengths (4 per path). The film accumulates CIE XYZ.
+  - In participating media, distances are sampled with the hero wavelength and the path is weighted by **path-level spectral MIS** (Miller et al. 2019) in the path tracer, BDPT and both MLT variants. This keeps per-wavelength weights bounded in coloured media, which removes most of the colour speckle on subsurface materials.
   - **Chromatic dispersion** comes from Sellmeier or Cauchy IOR data (BK7, SF11, diamond, water, fused silica, sapphire).
   - RGB inputs are converted to smooth spectra with Jakob & Hanika 2019.
 - **Materials**
@@ -48,6 +49,9 @@ A physically based, **spectral**, **unbiased** renderer driven by **Metropolis L
   - Colour spaces: linear sRGB, ACEScg and Rec.2020, with optional white balance
   - **AOVs**: albedo, normal, depth and position
 - **Checkpoint and resume**: renders can be interrupted and continued. A resumed render is bit-identical to an uninterrupted one.
+- **Optional denoising and firefly clamp** (both biased, both off by default):
+  - `--denoise` writes an *extra* `<name>.denoised.<ext>` image using Intel Open Image Denoise. Its albedo and normal guides are followed through glass, so detail seen through glass is preserved. The unbiased image is always written too.
+  - `--clamp <Y>` limits each sample's luminance (path tracer, BDPT and GPU).
 - **GPU rendering (optional)**: a SYCL path tracer for Intel GPUs (oneAPI), selected with `--device gpu` or from the UI. It matches the CPU path tracer to within noise. On an Arc A770 it is 2–16× faster than all 24 threads of an i9-12900KF (see [GPU rendering](#gpu-rendering)).
 - **No third-party libraries to install**: the BVH, EXR writer and RGB-to-spectrum fitting are built in. stb, nlohmann/json, doctest, tinyexr/miniz, cgltf and NanoVDB are vendored.
 
@@ -87,6 +91,16 @@ build.cmd ui         :: rebuild the app so it ships the GPU module next to its c
   - Kernels are compiled ahead of time for Arc (DG2) with the large register file. For another GPU, set `GPU_AOT_DEVICE` (for example `bmg`).
   - A generic SPIR-V image is also embedded, so other Intel GPUs work after a one-off JIT compile on first use.
 
+### Denoiser (optional)
+
+```bat
+build.cmd oidn       :: downloads Intel Open Image Denoise 2.5.1 (CPU device) into build\bin
+```
+
+- `prender.exe` loads `OpenImageDenoise.dll` at runtime only when `--denoise` is used. Without it, it warns and writes the unbiased outputs.
+- Only OIDN's CPU device is shipped, taking about 2 s at 4K. Its GPU device brings SYCL runtime DLLs whose names clash with the older ones `prender_gpu.dll` uses.
+- Run `build.cmd ui` afterwards so the WinUI app ships the denoiser too.
+
 ## Command line
 
 ```bat
@@ -102,6 +116,8 @@ prender model.glb --out model.png                                     :: glTF / 
 prender kitchen.pbrt --convert kitchen.prscene.json                   :: convert to native JSON
 prender --list-devices                                                :: CPU and GPUs (add --progress json for JSON)
 prender scene.prscene.json --integrator path --device gpu --spp 4096  :: render on the GPU (or gpu:N)
+prender scene.prscene.json --integrator path --spp 256 --denoise      :: also writes *.denoised.* (biased)
+prender scene.prscene.json --integrator path --spp 256 --clamp 20     :: firefly clamp (biased)
 prender --help
 ```
 
@@ -133,7 +149,7 @@ With `--progress json`, the renderer writes one JSON event per line on stdout. T
 
 - **Top, Front and Right** are schematic orthographic views. Drag to pan, use the wheel to zoom, and double-click to frame the scene. Hovering over an object shows its name.
 - **Camera** shows a quick ray-cast preview framed to the film aspect ratio. Drag to orbit, right-drag to pan and use the wheel to dolly. Edited cameras are rendered through a small override scene that includes the original file.
-- **Render panel** controls the camera, integrator, resolution, samples, time limit, seed, **max depth** (starts at the scene's value; 0 = the integrator's default), **device**, light rigs and optional AOVs. The device list is the CPU plus any GPU reported by `prender --list-devices`; choosing a GPU locks the integrator to the path tracer. **Render** launches `prender.exe`, shows the progressive preview live, and saves results under `%LOCALAPPDATA%\PRenderUI\renders\`. **Continue** resumes the last render from its checkpoint with twice the samples.
+- **Render panel** controls the camera, integrator, resolution, samples, time limit, seed, **max depth** (starts at the scene's value; 0 = the integrator's default), **device**, light rigs and optional AOVs. The device list is the CPU plus any GPU reported by `prender --list-devices`; choosing a GPU locks the integrator to the path tracer. **Denoise** also writes a denoised image, and a *Denoised* toggle switches the result between it and the unbiased render. **Firefly clamp** sets `--clamp`. **Render** launches `prender.exe`, shows the progressive preview live, and saves results under `%LOCALAPPDATA%\PRenderUI\renders\`. **Continue** resumes the last render from its checkpoint with twice the samples.
 - **Open scene** accepts `.prscene.json`, `.gltf`, `.glb` and `.pbrt`. Foreign formats are normalized through `prender --convert`, and meshes are shown as bounding-box proxies.
 
 The app finds `prender.exe` next to itself, in a `build\bin` directory above it, or through `%PRENDER_EXE%`.
@@ -187,11 +203,14 @@ The `studio` rig has a gridded key light (cos^6 lobe), a large fill softbox and 
 - Checkpoint and resume: bit-exact equality with uninterrupted path tracer and MMLT renders, and rejection of mismatched checkpoints
 - The realistic lens: focusing, image orientation and dispersion
 - Normal and bump mapping
+- Chromatic subsurface scattering: the path tracer, BDPT, MMLT and PSSMLT agree per colour channel, and the path tracer's noise stays bounded
+- The MLT sampler draws first-used primary samples uniformly
+- The firefly clamp, denoiser guide buffers through glass, and OIDN denoising (skipped when OIDN is not installed)
 
 ## Layout
 
 ```
-src/core          math, sampling, spectra, colour, RGB->spectrum, film, image I/O, threading
+src/core          math, sampling, spectra, colour, RGB->spectrum, film, image I/O, threading, denoising (OIDN loader)
 src/geometry      shapes, OBJ/PLY loading, SAH BVH
 src/materials     BxDFs (GGX, dielectric, layered, sheen), textures, materials
 src/media         homogeneous, voxel-grid, NanoVDB and noise media
@@ -213,7 +232,9 @@ schemas/          JSON Schema for .prscene.json
 - Memory at very high resolutions: the film holds 3 doubles per pixel, so 4K needs 0.2 GB, 8K 0.8 GB and 16K about 3 GB. A 16K checkpoint is the same size on disk, and a float EXR is about 1.5 GB (half: about 0.8 GB). The CLI prints the estimate and warns when it approaches the available memory; the UI shows it under the resolution.
 - The realistic lens camera works with the path tracer only, because it has no closed-form importance for light tracing.
 - The GPU runs only the path tracer, and only on Intel GPUs through oneAPI and Level Zero. Scenes with coats or sheen get a much smaller speed-up (see [GPU rendering](#gpu-rendering)).
-- USD import, OIDN denoising and manifold-exploration mutations are not implemented (see `PLAN.md`).
+- USD import and manifold-exploration mutations are not implemented (see `PLAN.md`).
+- Denoising and the firefly clamp are biased, and are only ever extra options. Denoising can shift colours slightly on high-variance materials (measured up to about −15% in blue on subsurface spheres at low sample counts), so the unbiased image is always kept. Denoising runs on the CPU only. The clamp doesn't apply to MLT.
+- Dispersive glass still produces coloured fireflies: a dispersive surface reduces the path to its hero wavelength, which spectral MIS can't help with.
 - Compressed (ZIP/Blosc) NanoVDB files must be re-saved uncompressed.
 - The pbrt importer covers the common subset. Unsupported features (curves, cylinders, displacement, motion blur, measured BSDFs) are skipped with a warning.
 - SDS paths lit by *point* lights through *pinhole* cameras have zero probability under any unbiased sampler. Use area lights and thin-lens cameras for caustics seen through glass.
@@ -232,3 +253,5 @@ Vendored third-party code in `third_party/` keeps its own license:
 | [tinyexr](https://github.com/syoyo/tinyexr) / miniz | BSD-3-Clause / MIT |
 | [cgltf](https://github.com/jkuhlmann/cgltf) | MIT |
 | [NanoVDB](https://github.com/AcademySoftwareFoundation/openvdb) (headers) | Apache-2.0 |
+
+Optional runtime components are downloaded by the build rather than vendored: [Intel Open Image Denoise](https://github.com/RenderKit/oidn) (Apache-2.0, `build.cmd oidn`) and the Intel oneAPI SYCL runtime (`build.cmd gpu`).

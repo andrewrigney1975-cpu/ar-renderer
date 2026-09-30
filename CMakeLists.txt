@@ -35,6 +35,7 @@ add_library(pr_core STATIC
   src/core/image.cpp
   src/core/exr_read.cpp
   third_party/tinyexr/miniz.c
+  src/core/denoise.cpp
   src/core/film.cpp
   src/geometry/shape.cpp
   src/geometry/mesh_io.cpp
@@ -82,6 +83,7 @@ if(PR_BUILD_TESTS)
     tests/test_import.cpp
     tests/test_checkpoint.cpp
     tests/test_camera.cpp
+    tests/test_quality.cpp
   )
   target_link_libraries(prender_tests PRIVATE pr_core)
   if(MSVC)

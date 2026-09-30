@@ -5,6 +5,7 @@ rem   build.cmd renderer   renderer only
 rem   build.cmd ui         WinUI 3 app only
 rem   build.cmd test       renderer + run unit/integration tests
 rem   build.cmd gpu        prender_gpu.dll (SYCL path tracer; needs Intel oneAPI DPC++)
+rem   build.cmd oidn       fetch Intel Open Image Denoise (optional denoising) into build\bin
 setlocal
 set "TARGET=%~1"
 if "%TARGET%"=="" set "TARGET=all"
@@ -19,6 +20,7 @@ if not defined VSINSTALL (
 
 if /i "%TARGET%"=="ui" goto :ui
 if /i "%TARGET%"=="gpu" goto :gpu
+if /i "%TARGET%"=="oidn" goto :oidn
 
 call "%VSINSTALL%\VC\Auxiliary\Build\vcvars64.bat" >nul || exit /b 1
 cmake -S "%ROOT%." -B "%ROOT%build" -G Ninja -DCMAKE_BUILD_TYPE=Release || exit /b 1
@@ -69,4 +71,22 @@ for %%f in ("%ONEAPI_ROOT%\umf\latest\bin\umf.dll" "%ONEAPI_ROOT%\tcm\latest\bin
   if exist %%f copy /y %%f "%ROOT%build\bin\" >nul
 )
 echo GPU module: %ROOT%build\bin\prender_gpu.dll
+goto :eof
+
+:oidn
+rem Open Image Denoise (Apache-2.0) is loaded at runtime by prender.exe for --denoise. Only the
+rem CPU device is shipped: OIDN's GPU device brings its own SYCL / Unified Runtime DLLs, whose
+rem names clash with the (older) ones prender_gpu.dll uses.
+set "OIDN_VER=2.5.1"
+set "OIDN_DIR=%ROOT%third_party\oidn\oidn-%OIDN_VER%.x64.windows"
+if not exist "%OIDN_DIR%\bin\OpenImageDenoise.dll" (
+  if not exist "%ROOT%third_party\oidn" mkdir "%ROOT%third_party\oidn"
+  echo Downloading Open Image Denoise %OIDN_VER%...
+  powershell -NoProfile -Command "$ErrorActionPreference='Stop'; Invoke-WebRequest 'https://github.com/RenderKit/oidn/releases/download/v%OIDN_VER%/oidn-%OIDN_VER%.x64.windows.zip' -OutFile '%ROOT%third_party\oidn\oidn.zip'; Expand-Archive '%ROOT%third_party\oidn\oidn.zip' -DestinationPath '%ROOT%third_party\oidn' -Force; Remove-Item '%ROOT%third_party\oidn\oidn.zip'" || exit /b 1
+)
+if not exist "%ROOT%build\bin" mkdir "%ROOT%build\bin"
+for %%f in (OpenImageDenoise.dll OpenImageDenoise_core.dll OpenImageDenoise_device_cpu.dll tbb12.dll) do (
+  copy /y "%OIDN_DIR%\bin\%%f" "%ROOT%build\bin\" >nul || exit /b 1
+)
+echo Denoiser: %ROOT%build\bin\OpenImageDenoise.dll (OIDN %OIDN_VER%, CPU device)
 endlocal

@@ -1193,6 +1193,7 @@ void Loader::ParseRender() {
         rs.film.height = int(GetFloat(f, "height", 360));
         rs.film.exposure = GetFloat(f, "exposure", 0.f);
         rs.film.whiteBalance = GetFloat(f, "white_balance", 0.f);
+        rs.film.clampLuminance = std::max(0.f, GetFloat(f, "clamp", 0.f));
         if (f.contains("colorspace") && !ParseColorSpace(f["colorspace"].get<std::string>(), &rs.film.colorSpace))
             Fail("unknown colorspace '" + f["colorspace"].get<std::string>() + "'");
         if (f.contains("filter")) {
@@ -1205,6 +1206,7 @@ void Loader::ParseRender() {
             if (fl.is_object() && fl.contains("radius")) rs.film.filter.radius = fl["radius"].get<float>();
         }
     }
+    rs.denoise = GetBool(r, "denoise", false);
     if (r.contains("device")) {
         std::string d = GetString(r, "device", "cpu");
         if (d == "cpu") rs.integrator.device = -1;

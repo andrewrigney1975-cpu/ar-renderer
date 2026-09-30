@@ -122,15 +122,33 @@ SampledSpectrum PathIntegrator::Li(const Scene &scene, Ray ray, SampledWavelengt
     const int maxDepth = settings_.maxDepth > 0 ? settings_.maxDepth : std::numeric_limits<int>::max();
     int interfaceCrossings = 0;
 
+    // Path-level spectral MIS for media: distances are sampled with the hero wavelength and
+    // rPath[i] = (path pdf had wavelength i been the hero) / (hero path pdf). Each contribution is
+    // divided by rPath.Average(), which keeps per-wavelength weights bounded however many
+    // scattering events a chromatic medium adds. If dispersion later collapses the path to its
+    // hero wavelength, only the hero estimate is valid, so the unweighted sum (Lhero) is returned.
+    SampledSpectrum rPath(1.f), Lhero(0.f);
+    auto add = [&](const SampledSpectrum &c) {
+        Lhero += c;
+        float a = rPath.Average();
+        if (a > 0 && std::isfinite(a)) L += c / a;
+    };
+    // Throughput as it will actually be weighted (for Russian roulette).
+    auto effectiveBeta = [&] {
+        if (lambda.SecondaryTerminated()) return beta;
+        float a = rPath.Average();
+        return a > 0 && std::isfinite(a) ? beta / a : SampledSpectrum(0.f);
+    };
+
     auto addEmitted = [&](const Light *light, const SampledSpectrum &Le, const Vec3f &dir) {
         if (!Le) return;
         if (depth == 0 || specularBounce) {
-            L += beta * Le;
+            add(beta * Le);
         } else {
             float pmf = settings_.lightBVH ? scene.lightBVH.PMF(prevCtx.p, prevCtx.n, light) : scene.lightSampler.PMF(light);
             float lightPdf = pmf * light->PDF_Li(prevCtx, dir);
             float w = PowerHeuristic(1, prevPdf, 1, lightPdf);
-            L += beta * Le * w;
+            add(beta * Le * w);
         }
     };
 
@@ -139,8 +157,9 @@ SampledSpectrum PathIntegrator::Li(const Scene &scene, Ray ray, SampledWavelengt
         auto si = scene.Intersect(ray, Infinity, &tHit);
 
         if (medium) {
-            auto ds = medium->SampleDistance(ray, si ? tHit : Infinity, sampler.Get1D(), lambda);
+            auto ds = medium->SampleDistanceHero(ray, si ? tHit : Infinity, sampler.Get1D(), lambda);
             beta *= ds.weight;
+            rPath *= ds.pdfRatio;
             if (!beta) break;
             if (ds.scattered) {
                 if (depth++ >= maxDepth) break;
@@ -149,7 +168,7 @@ SampledSpectrum PathIntegrator::Li(const Scene &scene, Ray ray, SampledWavelengt
                 mi.wo = -ray.d;
                 mi.medium = medium;
                 mi.g = medium->G();
-                L += beta * SampleLd(scene, mi, nullptr, mi.g, Vec3f(), lambda, sampler);
+                add(beta * SampleLd(scene, mi, nullptr, mi.g, Vec3f(), lambda, sampler));
                 float phasePdf;
                 Vec3f wi = SampleHenyeyGreenstein(mi.wo, mi.g, sampler.Get2D(), &phasePdf);
                 if (phasePdf == 0) break;
@@ -160,7 +179,7 @@ SampledSpectrum PathIntegrator::Li(const Scene &scene, Ray ray, SampledWavelengt
                 ray = Ray(mi.p, wi);
                 // Russian roulette.
                 if (settings_.russianRoulette && depth > 1) {
-                    float m = beta.MaxComponentValue() * etaScale;
+                    float m = effectiveBeta().MaxComponentValue() * etaScale;
                     if (m < 1) {
                         float q = std::max(0.f, 1 - m);
                         if (sampler.Get1D() < q) break;
@@ -190,7 +209,7 @@ SampledSpectrum PathIntegrator::Li(const Scene &scene, Ray ray, SampledWavelengt
         if (!bsdf) break;
         if (depth++ >= maxDepth) break;
 
-        if (bsdf.HasNonSpecular()) L += beta * SampleLd(scene, *si, &bsdf, 0, si->shading.n, lambda, sampler);
+        if (bsdf.HasNonSpecular()) add(beta * SampleLd(scene, *si, &bsdf, 0, si->shading.n, lambda, sampler));
 
         Vec3f wo = si->wo;
         float uc = sampler.Get1D();
@@ -207,7 +226,7 @@ SampledSpectrum PathIntegrator::Li(const Scene &scene, Ray ray, SampledWavelengt
 
         if (!beta || beta.HasNaNs()) break;
         if (settings_.russianRoulette && depth > 1) {
-            float m = beta.MaxComponentValue() * etaScale;
+            float m = effectiveBeta().MaxComponentValue() * etaScale;
             if (m < 1) {
                 float q = std::max(0.f, 1 - m);
                 if (sampler.Get1D() < q) break;
@@ -215,7 +234,7 @@ SampledSpectrum PathIntegrator::Li(const Scene &scene, Ray ray, SampledWavelengt
             }
         }
     }
-    return L;
+    return lambda.SecondaryTerminated() ? Lhero : L;
 }
 
 } // namespace pr
