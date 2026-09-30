@@ -171,7 +171,7 @@ Scenes are JSON files that may contain comments. See [`schemas/prscene.schema.js
 | `cameras` | Any number of named cameras | Optics and pose only; film settings live in `render.film` |
 | `render` | Integrator, film and outputs | Every value can be overridden from the command line |
 
-`include` merges other files first: dictionary sections merge by id and `objects` are concatenated. `import` does the same for glTF, pbrt or scene files and can place them with a `transform`. The sample scene keeps materials in `materials.json` and each light rig in `rigs/*.json`.
+`include` merges other files first: dictionary sections merge by id and `objects` are concatenated. `import` does the same for glTF, pbrt or scene files and can place them with a `transform`. The sample scenes keep materials in `materials.json` and each light rig in `rigs/*.json`.
 
 ## Sample scenes
 
@@ -245,7 +245,7 @@ src/gpu           prender_gpu.dll: SYCL path-tracing kernel and its C ABI
 src/cli           prender.exe
 src/ui/PRenderUI  WinUI 3 front end (C#, Win2D)
 tests/            doctest unit and integration tests
-scenes/           sample scenes
+scenes/           sample scenes (sphere-pyramid, diamonds + its generator)
 schemas/          JSON Schema for .prscene.json
 ```
 
