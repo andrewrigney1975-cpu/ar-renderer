@@ -29,6 +29,9 @@
             <TextBlock x:Name="ScenePathText" Grid.Column="1" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"
                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" Style="{StaticResource CaptionTextBlockStyle}" />
             <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="8">
+                <ComboBox x:Name="SceneBox" MinWidth="220" PlaceholderText="Scene" VerticalAlignment="Center"
+                          SelectionChanged="OnSceneSelected" DropDownOpened="OnSceneDropDownOpened"
+                          ToolTipService.ToolTip="Scenes in the folder above the current scene's folder (rescanned when opened)" />
                 <Button x:Name="OpenButton" Click="OnOpenClick" ToolTipService.ToolTip="Open a .prscene.json scene">
                     <StackPanel Orientation="Horizontal" Spacing="6">
                         <FontIcon Glyph="&#xE8E5;" FontSize="14" />

@@ -1,0 +1,32 @@
+{
+  "lights": {
+    "window": {
+      "type": "rect",
+      "position": [
+        -22,
+        11,
+        3
+      ],
+      "look_at": [
+        0,
+        0,
+        0
+      ],
+      "size": [
+        8,
+        12
+      ],
+      "temperature": 6500,
+      "luminance": 12
+    },
+    "bounce": {
+      "type": "environment",
+      "color": [
+        0.95,
+        0.9,
+        0.82
+      ],
+      "intensity": 0.05
+    }
+  }
+}

@@ -1,0 +1,90 @@
+{
+  "lights": {
+    "key": {
+      "type": "rect",
+      "position": [
+        -9,
+        16,
+        8
+      ],
+      "look_at": [
+        0,
+        0,
+        0
+      ],
+      "size": [
+        1.6,
+        1.6
+      ],
+      "temperature": 5600,
+      "luminance": 300,
+      "cos_power": 4
+    },
+    "kicker_left": {
+      "type": "rect",
+      "position": [
+        -14,
+        7,
+        -9
+      ],
+      "look_at": [
+        0,
+        0,
+        0
+      ],
+      "size": [
+        0.7,
+        0.7
+      ],
+      "temperature": 5200,
+      "luminance": 700
+    },
+    "kicker_right": {
+      "type": "rect",
+      "position": [
+        13,
+        9,
+        -7
+      ],
+      "look_at": [
+        0,
+        0,
+        0
+      ],
+      "size": [
+        0.7,
+        0.7
+      ],
+      "temperature": 6000,
+      "luminance": 700
+    },
+    "softbox": {
+      "type": "rect",
+      "position": [
+        4,
+        24,
+        12
+      ],
+      "look_at": [
+        0,
+        0,
+        0
+      ],
+      "size": [
+        14,
+        9
+      ],
+      "temperature": 6000,
+      "luminance": 0.45
+    },
+    "surround": {
+      "type": "environment",
+      "color": [
+        0.55,
+        0.58,
+        0.66
+      ],
+      "intensity": 0.008
+    }
+  }
+}
